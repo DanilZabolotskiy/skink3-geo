@@ -1,0 +1,62 @@
+{
+  "city": "valletta",
+  "name": "Valletta",
+  "centre": [14.5146,35.8989],
+  "views": {
+    "metro": [14.31,35.79,14.59,35.99]
+  },
+  "region": {
+    "centre": [14.5146,35.8989],
+    "bbox": [6,30,24,41],
+    "country": "MLT",
+    "rivers": {
+      "rank": 3
+    },
+    "lakes": {
+      "rank": 4
+    }
+  },
+  "water": {
+    "view": "metro",
+    "from": ["copernicus"],
+    "mask": ["ocean","lake","river"],
+    "cell": 15
+  },
+  "relief": {
+    "view": "metro",
+    "cell": 60,
+    "smooth": 180,
+    "contours": {
+      "step": 50
+    }
+  },
+  "builtUp": {
+    "view": "metro",
+    "from": "ghsl",
+    "years": [1975,2020],
+    "cell": 50,
+    "share": 0.2,
+    "bridge": 350,
+    "round": 2.5
+  },
+  "epochs": [
+    {
+      "id": "y1975",
+      "year": 1975,
+      "name": "Valletta in 1975",
+      "outline": {
+        "builtUp": 1975
+      },
+      "source": "The built-up city of 1975 as satellite images show it (the Global Human Settlement Layer)."
+    },
+    {
+      "id": "y2020",
+      "year": 2020,
+      "name": "Valletta in 2020",
+      "outline": {
+        "builtUp": 2020
+      },
+      "source": "The built-up city of 2020 as satellite images show it (the Global Human Settlement Layer)."
+    }
+  ]
+}

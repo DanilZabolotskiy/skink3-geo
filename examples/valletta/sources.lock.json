@@ -1,0 +1,96 @@
+{
+  "format": "cities-geo-lock/1",
+  "city": "valletta",
+  "downloads": [
+    {
+      "id": "copernicus-glo30-35-14",
+      "source": "copernicus",
+      "licence": "free of charge with attribution (Copernicus DEM licence)",
+      "request": "https://copernicus-dem-30m.s3.amazonaws.com/Copernicus_DSM_COG_10_N35_00_E014_00_DEM/Copernicus_DSM_COG_10_N35_00_E014_00_DEM.tif",
+      "bytes": 1394973,
+      "sha256": "5cf508b5e8e699abcfec8cd4d7c577b319cfbfb52f234be569f4dac7932972a2",
+      "retrieved": "2026-11-19",
+      "dataDate": "2011-2015"
+    },
+    {
+      "id": "copernicus-wbm-35-14",
+      "source": "copernicus",
+      "licence": "free of charge with attribution (Copernicus DEM licence)",
+      "request": "https://copernicus-dem-30m.s3.amazonaws.com/Copernicus_DSM_COG_10_N35_00_E014_00_DEM/AUXFILES/Copernicus_DSM_COG_10_N35_00_E014_00_WBM.tif",
+      "bytes": 79893,
+      "sha256": "05137cc7868aa7a930db0040b586fd9626fe80f53ace48b15dcb59a620b2b76a",
+      "retrieved": "2026-11-19",
+      "dataDate": "2011-2015"
+    },
+    {
+      "id": "ghsl-built-s-1975-r5-c20",
+      "source": "ghsl",
+      "licence": "free and open: \"reuse of this data is authorised with proper acknowledgment of the source\" (European Commission)",
+      "request": "https://jeodpp.jrc.ec.europa.eu/ftp/jrc-opendata/GHSL/GHS_BUILT_S_GLOBE_R2023A/GHS_BUILT_S_E1975_GLOBE_R2023A_54009_100/V1-0/tiles/GHS_BUILT_S_E1975_GLOBE_R2023A_54009_100_V1_0_R5_C20.zip",
+      "bytes": 8107623,
+      "sha256": "e1ce29d8754263e9d5ceb3c4c9c69a5b34f70eeeeebc2de94042b1c8b79ac1c8",
+      "retrieved": "2026-11-19",
+      "dataDate": "1975 (release R2023A)"
+    },
+    {
+      "id": "ghsl-built-s-2020-r5-c20",
+      "source": "ghsl",
+      "licence": "free and open: \"reuse of this data is authorised with proper acknowledgment of the source\" (European Commission)",
+      "request": "https://jeodpp.jrc.ec.europa.eu/ftp/jrc-opendata/GHSL/GHS_BUILT_S_GLOBE_R2023A/GHS_BUILT_S_E2020_GLOBE_R2023A_54009_100/V1-0/tiles/GHS_BUILT_S_E2020_GLOBE_R2023A_54009_100_V1_0_R5_C20.zip",
+      "bytes": 9866105,
+      "sha256": "11aff3296bcfdaba79eb234613e24db879596ee55e1fe8adace3f47a3061b266",
+      "retrieved": "2026-11-19",
+      "dataDate": "2020 (release R2023A)"
+    },
+    {
+      "id": "ne_10m_admin_0_boundary_lines_land",
+      "source": "natural-earth",
+      "licence": "public domain",
+      "request": "natural-earth 5.1.2 ne_10m_admin_0_boundary_lines_land.geojson",
+      "bytes": 2284669,
+      "sha256": "74d9c16229c095fde65943a9919e337682f044bcebccb120764f38edf3b70f4a",
+      "retrieved": "2026-11-19",
+      "dataDate": "5.1.2"
+    },
+    {
+      "id": "ne_10m_admin_0_countries",
+      "source": "natural-earth",
+      "licence": "public domain",
+      "request": "natural-earth 5.1.2 ne_10m_admin_0_countries.geojson",
+      "bytes": 13287234,
+      "sha256": "239eec57ac17f100a11e2536cffc56752c318b50ae765b0918ff7aab4ce8f255",
+      "retrieved": "2026-11-19",
+      "dataDate": "5.1.2"
+    },
+    {
+      "id": "ne_10m_lakes",
+      "source": "natural-earth",
+      "licence": "public domain",
+      "request": "natural-earth 5.1.2 ne_10m_lakes.geojson",
+      "bytes": 5043554,
+      "sha256": "2d036f53dedec578001c5c30c2959ee7d4eebc1306900fa4367c49929ec8f2d9",
+      "retrieved": "2026-11-19",
+      "dataDate": "5.1.2"
+    },
+    {
+      "id": "ne_10m_land",
+      "source": "natural-earth",
+      "licence": "public domain",
+      "request": "natural-earth 5.1.2 ne_10m_land.geojson",
+      "bytes": 10157965,
+      "sha256": "1ac90796408bc6ad6911d69448485d3c4dbf2190370080368a09976e1c9f7416",
+      "retrieved": "2026-11-19",
+      "dataDate": "5.1.2"
+    },
+    {
+      "id": "ne_10m_rivers_lake_centerlines",
+      "source": "natural-earth",
+      "licence": "public domain",
+      "request": "natural-earth 5.1.2 ne_10m_rivers_lake_centerlines.geojson",
+      "bytes": 7307743,
+      "sha256": "bb854a900ecbd3b408df46d5e16e3e0f974ba55993f9d8b5c26e855273c0905a",
+      "retrieved": "2026-11-19",
+      "dataDate": "5.1.2"
+    }
+  ]
+}

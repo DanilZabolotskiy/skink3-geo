@@ -1,0 +1,5 @@
+node_modules/
+# the raw downloads and the previews of every root of cities
+cache/
+out/
+.env

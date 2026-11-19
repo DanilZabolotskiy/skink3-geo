@@ -1,0 +1,3 @@
+# Text is stored with LF whatever a checkout or a tool writes, so that the layers a build writes are
+# the same bytes as the ones committed.
+* text=auto
