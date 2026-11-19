@@ -78,6 +78,9 @@ test('example: it fits a stage: outlines of at most 200 points that do not cross
     assert.deepEqual(morph.at(0), morph.from);
     assert.deepEqual(morph.at(1), morph.to);
   }
+  // A point a hair off the middle of the stage is at 0 and never at -0, so a morph at its start is its first outline, value for value.
+  const middle = fitView([-960, -540, 960, 540], stage).project([-0.01, 0.01]);
+  assert.ok(Object.is(middle[0], 0) && Object.is(middle[1], 0));
   // The whole box shown: nothing of it is cropped.
   const whole = fitView(l.frames.city.box, stage, { mode: 'contain' });
   assert.ok(whole.box[0] <= l.frames.city.box[0] + 1e-6 && whole.box[3] >= l.frames.city.box[3] - 1e-6);

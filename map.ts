@@ -226,9 +226,12 @@ export function fitView(box: Box, stage: { w: number; h: number; at?: Point }, o
   return {
     box: [cx - hw, cy - hh, cx + hw, cy + hh],
     scale,
-    project: (p) => [Math.round((ax + (p[0]! - cx) * scale) * 10) / 10, Math.round((ay - (p[1]! - cy) * scale) * 10) / 10],
+    project: (p) => [tenth(ax + (p[0]! - cx) * scale), tenth(ay - (p[1]! - cy) * scale)],
   };
 }
+
+/** A stage coordinate to a tenth of a unit, and never -0: a point a hair left of the middle is at 0, as one a hair right of it is. */
+const tenth = (v: number): number => Math.round(v * 10) / 10 + 0;
 
 export interface StageOptions {
   /** The least bend drawn, in stage units (0.6): a shallower one is drawn straight. */
@@ -353,5 +356,5 @@ export function morphOnStage(view: View, from: Epoch, to: Epoch): { from: Point[
   const a = from.morph.map(view.project);
   const b = to.morph.map(view.project);
   if (a.length !== b.length) throw new Error(`morphOnStage: ${from.id} has ${a.length} points, ${to.id} has ${b.length}`);
-  return { from: a, to: b, at: (t) => a.map((p, k) => [Math.round((p[0] + (b[k]![0] - p[0]) * t) * 10) / 10, Math.round((p[1] + (b[k]![1] - p[1]) * t) * 10) / 10]) };
+  return { from: a, to: b, at: (t) => a.map((p, k) => [tenth(p[0] + (b[k]![0] - p[0]) * t), tenth(p[1] + (b[k]![1] - p[1]) * t)]) };
 }
