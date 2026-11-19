@@ -7,6 +7,8 @@
 //   const water = ringsOnStage(view, town.city.water!.map((f) => f.ring));          // points of closed regions
 //   const coast = linesOnStage(view, town.city.relief!.contours[0]!.lines);         // points of open strokes
 //   const grow = morphOnStage(view, town.city.epochs![0]!, town.city.epochs![1]!);  // grow.at(t), t from 0 to 1
+//   const far = fitView(town.frames.city.views.wide!, { w: 1920, h: 1080 });
+//   const ground = town.city.terrain!.bands.map((b) => ({ band: b.band, pieces: ringsInTiles(far, [b.ring]) }));
 //
 // This file draws nothing and names no colour: what a layer looks like is the scene's.
 
@@ -71,6 +73,30 @@ export interface Epoch {
   morph: Ring;
 }
 
+/** The terrain of a wide view, for a map with depth: the land, and its ground in bands of height. */
+export interface Terrain {
+  /** The view it covers, where the spec names one. */
+  view?: string;
+  /** What it covers, [x0, y0, x1, y1] in metres. */
+  box: Box;
+  /** The cell of its grid of heights, in metres: a form smaller than a few cells is not in it. */
+  cell: number;
+  /** The heights the bands part at, in metres above the sea, the lowest first. */
+  levels: number[];
+  /** The land that stands out of the sea, the largest first, an island a ring of its own. The sea is what the land leaves. */
+  land: { id: string; areaHa: number; ring: Ring }[];
+  /**
+   * The ground by height, in the order to paint it over the land: a ring before those inside it, so the largest first. A ring at
+   * `height` holds the ground at least that high; a `pit` holds a hollow below `height` within higher ground. `band` is what to
+   * paint either as: 0 is the land below `levels[0]`, k the ground from `levels[k - 1]` up.
+   */
+  bands: { id: string; band: number; height: number; pit?: true; areaHa: number; ring: Ring }[];
+  /** Standing water apart from the sea, painted over the bands. */
+  lakes: { id: string; areaHa: number; ring: Ring }[];
+  /** Rivers as lines, each cut where it meets the sea. */
+  rivers: { id: string; name: string; lengthKm: number; lines: Line[] }[];
+}
+
 export interface CityFrameLayers {
   /** Water as whole forms: a river with its banks, a lake, the sea. */
   water?: { id: string; areaHa: number; ring: Ring }[];
@@ -93,6 +119,8 @@ export interface CityFrameLayers {
   /** The city's outline through time, the earliest first. */
   epochs?: Epoch[];
   landmarks?: { id: string; name: string; built?: number; at: Point; lonlat: LonLat }[];
+  /** The country round the city in its own plane: the land, the lakes, the rivers, the ground in bands of height. */
+  terrain?: Terrain;
 }
 
 /** layers.json as it is written: `region` in the region's frame, `city` in the city's. */
@@ -116,7 +144,8 @@ export function loadLayers(file: string | URL): Layers {
 /**
  * What is wrong with the layers of a city, one line a fault; none when they keep to the format:
  * every outline runs counter-clockwise, does not cross itself and lies in its frame; the epochs
- * come in the order of their years with morph rings of one size; every hill has its rings.
+ * come in the order of their years with morph rings of one size; every hill has its rings; the bands
+ * of a terrain come in the order to paint them, each with the band of its height.
  */
 export function faultsOf(l: Layers): string[] {
   const out: string[] = [];
@@ -153,6 +182,17 @@ export function faultsOf(l: Layers): string[] {
   }
   if (epochs.some((e, k) => k > 0 && e.year < epochs[k - 1]!.year)) out.push('city.epochs: not in the order of their years');
   if (new Set(epochs.map((e) => e.morph.length)).size > 1) out.push('city.epochs: morph rings of different sizes');
+  const t = l.city.terrain;
+  if (t) {
+    if (t.levels.some((level, k) => k > 0 && level <= t.levels[k - 1]!)) out.push('city.terrain.levels: not in rising order');
+    for (const f of t.land) ring(`city.terrain.land.${f.id}`, f.ring, t.box);
+    for (const f of t.lakes) ring(`city.terrain.lakes.${f.id}`, f.ring, t.box);
+    for (const [k, b] of t.bands.entries()) {
+      ring(`city.terrain.bands.${b.id}`, b.ring, t.box);
+      if (t.levels[b.pit ? b.band : b.band - 1] !== b.height) out.push(`city.terrain.bands.${b.id}: its band is not that of its height`);
+      if (k > 0 && area(b.ring) > area(t.bands[k - 1]!.ring)) out.push(`city.terrain.bands.${b.id}: larger than the band painted before it`);
+    }
+  }
   return out;
 }
 
@@ -234,7 +274,64 @@ export function ringsOnStage(view: View, rings: readonly Ring[], o: StageOptions
   return out;
 }
 
+export interface TileOptions extends StageOptions {
+  /** The side of a tile, in stage units (480). */
+  tile?: number;
+  /** How far a tile reaches into its neighbours, in stage units (2), so that fills of one colour leave no seam. */
+  overlap?: number;
+}
+
+/**
+ * Rings of the plane as outlines on the stage, for forms too rich for one outline (the bands of a
+ * terrain, the land of a coast): the stage is cut into tiles, each ring into the pieces that lie in
+ * each tile, and a piece that still holds more than `max` points at `detail` is cut in four again.
+ * So the points limit holds for a piece, and the form keeps its detail. The pieces of a ring come
+ * together, in the order of the rings, so the order to paint them in holds. They overlap a little:
+ * they are for fills of one colour, and a stroke along them would show the tiles.
+ */
+export function ringsInTiles(view: View, rings: readonly Ring[], o: TileOptions = {}): Point[][] {
+  const box = grown(view, o.margin ?? 120);
+  const side = (o.tile ?? 480) / view.scale;
+  const lap = (o.overlap ?? 2) / view.scale;
+  const detail = o.detail ?? 0.6;
+  const max = o.max ?? 200;
+  const out: Point[][] = [];
+  const emit = (ring: Ring, tile: Box, depth: number): void => {
+    for (const piece of clipRing(ring, [tile[0] - lap, tile[1] - lap, tile[2] + lap, tile[3] + lap])) {
+      const flat = dedupe(piece.map(view.project), 0.05, true);
+      if (flat.length < 3 || area(flat) < 2) continue;
+      const pts = depth < 5 && simplify(flat, detail, true).length > max ? null : thin(flat, detail, max, true);
+      if (pts) {
+        if (pts.length >= 3) out.push(pts);
+        continue;
+      }
+      if (depth >= 5) continue;
+      const [mx, my] = [(tile[0] + tile[2]) / 2, (tile[1] + tile[3]) / 2];
+      for (const quarter of [[tile[0], tile[1], mx, my], [mx, tile[1], tile[2], my], [tile[0], my, mx, tile[3]], [mx, my, tile[2], tile[3]]] as Box[]) emit(piece, quarter, depth + 1);
+    }
+  };
+  for (const ring of rings) {
+    if (area(ring) * view.scale * view.scale < (o.minArea ?? 30)) continue;
+    let [x0, y0, x1, y1] = [Infinity, Infinity, -Infinity, -Infinity];
+    for (const p of ring) {
+      if (p[0] < x0) x0 = p[0];
+      if (p[0] > x1) x1 = p[0];
+      if (p[1] < y0) y0 = p[1];
+      if (p[1] > y1) y1 = p[1];
+    }
+    for (let ty = box[1]; ty < box[3]; ty += side) {
+      for (let tx = box[0]; tx < box[2]; tx += side) {
+        const tile: Box = [tx, ty, Math.min(box[2], tx + side), Math.min(box[3], ty + side)];
+        if (x1 < tile[0] - lap || x0 > tile[2] + lap || y1 < tile[1] - lap || y0 > tile[3] + lap) continue;
+        emit(ring, tile, 0);
+      }
+    }
+  }
+  return out;
+}
+
 /** Lines of the plane as lines on the stage: cut to the view (with its margin), thinned the same way. Each is the `points` of an open `stroke`. */
+
 export function linesOnStage(view: View, lines: readonly Line[], o: StageOptions = {}): Point[][] {
   const box = grown(view, o.margin ?? 120);
   const out: Point[][] = [];

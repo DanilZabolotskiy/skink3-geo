@@ -13,12 +13,32 @@
       "dataDate": "2011-2015"
     },
     {
+      "id": "copernicus-glo30-36-14",
+      "source": "copernicus",
+      "licence": "free of charge with attribution (Copernicus DEM licence)",
+      "request": "https://copernicus-dem-30m.s3.amazonaws.com/Copernicus_DSM_COG_10_N36_00_E014_00_DEM/Copernicus_DSM_COG_10_N36_00_E014_00_DEM.tif",
+      "bytes": 7404386,
+      "sha256": "9e5231336ef818d73cc33c152ac39f4489c9e5a3046bc1933da6e612f6f283d5",
+      "retrieved": "2026-11-19",
+      "dataDate": "2011-2015"
+    },
+    {
       "id": "copernicus-wbm-35-14",
       "source": "copernicus",
       "licence": "free of charge with attribution (Copernicus DEM licence)",
       "request": "https://copernicus-dem-30m.s3.amazonaws.com/Copernicus_DSM_COG_10_N35_00_E014_00_DEM/AUXFILES/Copernicus_DSM_COG_10_N35_00_E014_00_WBM.tif",
       "bytes": 79893,
       "sha256": "05137cc7868aa7a930db0040b586fd9626fe80f53ace48b15dcb59a620b2b76a",
+      "retrieved": "2026-11-19",
+      "dataDate": "2011-2015"
+    },
+    {
+      "id": "copernicus-wbm-36-14",
+      "source": "copernicus",
+      "licence": "free of charge with attribution (Copernicus DEM licence)",
+      "request": "https://copernicus-dem-30m.s3.amazonaws.com/Copernicus_DSM_COG_10_N36_00_E014_00_DEM/AUXFILES/Copernicus_DSM_COG_10_N36_00_E014_00_WBM.tif",
+      "bytes": 75926,
+      "sha256": "26b881f4888725b873cc7e4a337011e42f694b8dc2051355b178deb31649c242",
       "retrieved": "2026-11-19",
       "dataDate": "2011-2015"
     },

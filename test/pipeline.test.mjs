@@ -11,13 +11,14 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { deflateRawSync, deflateSync } from 'node:zlib';
 import { framesOf, requestsOf, run, scaffold, sourcesText, stringify } from '../build.mjs';
-import { area, crosses, pointInRing, signedArea } from '../lib/geom.mjs';
+import { reduceTile, sampler, scaleOf, seaTile, waterShare } from '../lib/dem.mjs';
+import { area, crosses, lengthOf, pointInRing, signedArea } from '../lib/geom.mjs';
 import { builtShare, ghslTilesOf, ghslUrl, mollweide } from '../lib/ghsl.mjs';
-import { buildBuiltUp, buildEpochs, buildRelief, buildWall, growHills } from '../lib/layers.mjs';
+import { buildBuiltUp, buildEpochs, buildRelief, buildTerrain, buildWall, growHills, terrainCell, terrainPlan } from '../lib/layers.mjs';
 import { alive, yearOf } from '../lib/osm.mjs';
 import { projection } from '../lib/project.mjs';
 import { closeGaps, components, contours, fillHoles, fillPolygon, makeGrid } from '../lib/raster.mjs';
-import { licencesWith } from '../lib/sources.mjs';
+import { awmc, awmcName, licencesWith } from '../lib/sources.mjs';
 import { readRaster, unLzw } from '../lib/tiff.mjs';
 import { unzip, zipEntries } from '../lib/zip.mjs';
 
@@ -281,6 +282,109 @@ test('relief: contours at the heights asked for, or at a step; a hill is a stack
   assert.deepEqual(stepped.contours.map((c) => c.height), [30, 60, 90]);
 });
 
+test('dem: a tile is read by the scale, in blocks that are the mean of their samples; a water mask becomes a share of water', () => {
+  const second = 1 / 3600;
+  const tile = { lon0: 10, lat0: 45, dx: second, dy: second, w: 6, h: 4, data: Float32Array.from({ length: 24 }, (_, k) => k) };
+  const half = reduceTile(tile, 2);
+  assert.deepEqual([half.w, half.h, [...half.data]], [3, 2, [3.5, 5.5, 7.5, 15.5, 17.5, 19.5]]);
+  // A sample of the reduced tile stands at the middle of its block.
+  assert.ok(Math.abs(half.lon0 - (10 + second / 2)) < 1e-12 && Math.abs(half.lat0 - (45 - second / 2)) < 1e-12);
+  assert.deepEqual([half.dx, half.dy], [2 * second, 2 * second]);
+  // A block at the edge is narrower, and a sample with no height is left out of the mean.
+  assert.deepEqual([...reduceTile(tile, 4).data], [10.5, 13.5]);
+  const holed = reduceTile({ ...tile, data: Float32Array.from(tile.data, (v, k) => (k === 0 ? NaN : v)) }, 2);
+  assert.ok(Math.abs(holed.data[0] - 14 / 3) < 1e-6);
+  assert.ok(Number.isNaN(reduceTile({ ...tile, data: new Float32Array(24).fill(NaN) }, 2).data[0]));
+  assert.equal(reduceTile(tile, 1), tile);
+  assert.throws(() => reduceTile(tile, 1.5), /whole number/);
+  // On a slope the reduced tile reads as the whole one does: the mean of a block is the height at its middle.
+  const slope = { lon0: 10, lat0: 45, dx: second, dy: second, w: 8, h: 8, data: Float32Array.from({ length: 64 }, (_, k) => (k % 8) + 10 * Math.floor(k / 8)) };
+  const place = [10 + 3.3 * second, 45 - 2.7 * second];
+  assert.ok(Math.abs(sampler([slope])(place) - 30.3) < 1e-4 && Math.abs(sampler([reduceTile(slope, 2)])(place) - 30.3) < 1e-4);
+  // Samples an arc-second apart are about 31 m apart: a grid as fine takes the tile whole, a coarser one reads it in blocks.
+  assert.deepEqual(scaleOf(tile, 30), { factor: 1, samples: 1 });
+  assert.deepEqual(scaleOf(tile, 120), { factor: 2, samples: 2 });
+  assert.deepEqual(scaleOf(tile, 500), { factor: 8, samples: 2 });
+  const mask = { ...tile, w: 2, h: 2, data: Uint8Array.of(0, 1, 2, 3) };
+  assert.deepEqual([...waterShare(mask).data], [0, 1, 1, 1]);
+  assert.deepEqual([...waterShare(mask, ['lake']).data], [0, 0, 1, 0]);
+  assert.deepEqual([...reduceTile(waterShare(mask, ['ocean', 'lake']), 2).data], [0.5]);
+  assert.deepEqual([...waterShare(seaTile(10, 45), ['ocean']).data], [1, 1, 1, 1]);
+  assert.throws(() => waterShare(mask, ['pond']), /no water class "pond"/);
+});
+
+test('terrain: an island as its land, its ground in bands to paint in order, a pit, a lake, and a river cut at the coast', () => {
+  const proj = projection({ lon: 10, lat: 45 });
+  const frame = { proj, box: [-7000, -7000, 7000, 7000] };
+  const at = (f) => (lonlat) => f(...proj.forward(lonlat));
+  // An island 5 km in radius: a cone up to a rim of 300 m at 2 km from its middle, a crater down to 120 m inside
+  // the rim, and a cliff of 150 m along the east coast. A lake in the crater, and a pond too small to keep.
+  const heightAt = at((x, y) => {
+    const r = Math.hypot(x, y);
+    if (r >= 5000) return 0;
+    const cone = r >= 2000 ? (300 * (5000 - r)) / 3000 : 120 + (180 * r) / 2000;
+    return x > 3000 ? Math.max(cone, 150) : cone;
+  });
+  const seaAt = at((x, y) => (Math.hypot(x, y) >= 5000 ? 1 : 0));
+  const lakeAt = at((x, y) => (Math.hypot(x, y) < 600 || Math.hypot(x + 3500, y) < 250 ? 1 : 0));
+  const way = (id, name, points) => ({ type: 'way', id, tags: { waterway: 'river', name }, geometry: points.map((p) => proj.inverse(p)).map(([lon, lat]) => ({ lon, lat })) });
+  // A river in two ways from the rim to a point far out at sea, and one the spec does not name.
+  const osm = [way(1, 'Testwater', [[1000, 0], [2500, 300]]), way(2, 'Testwater', [[2500, 300], [4000, 0], [6500, 0]]), way(3, 'Otherwater', [[0, 3000], [0, 6000]])];
+  const spec = { cell: 100, levels: [50, 100, 200], rivers: { list: ['Testwater'] } };
+  const t = buildTerrain(spec, frame, { heightAt, seaAt, lakeAt, osm });
+  assert.deepEqual(t.lost, []);
+  assert.deepEqual([t.box, t.cell, t.levels], [frame.box, 100, [50, 100, 200]]);
+  const radius = (ring) => Math.sqrt(area(ring) / Math.PI);
+  // The land is one ring round the island; the sea is what it leaves.
+  assert.equal(t.land.length, 1);
+  const land = t.land[0].ring;
+  assert.ok(Math.abs(radius(land) - 5000) < 50);
+  // The bands come in the order to paint them: each ring lies inside the one before it.
+  assert.deepEqual(t.bands.map((b) => [b.id, b.band, b.height, b.pit ?? false]), [['band-50-0', 1, 50, false], ['band-100-0', 2, 100, false], ['band-200-0', 3, 200, false], ['pit-200-0', 2, 200, true]]);
+  for (const [k, b] of t.bands.entries()) {
+    assert.ok(signedArea(b.ring) > 0 && !crosses(b.ring, true), b.id);
+    assert.ok(b.ring.every((p) => Number.isInteger(p[0]) && Number.isInteger(p[1])), b.id);
+    assert.ok(b.ring.every((p) => pointInRing(p, k > 0 ? t.bands[k - 1].ring : land)), b.id);
+  }
+  // On the west the cone is cut where it should be; the crater is a pit, painted as the band it goes down into.
+  assert.ok(Math.abs(Math.min(...t.bands[0].ring.map((p) => p[0])) + 4500) < 60);
+  assert.ok(Math.abs(radius(t.bands[2].ring) - 3000) < 60);
+  assert.ok(Math.abs(radius(t.bands[3].ring) - 889) < 60);
+  // No band comes nearer the sea than a cell, though the cliff on the east stands at the water.
+  const toSegment = (p, a, b) => {
+    const [dx, dy] = [b[0] - a[0], b[1] - a[1]];
+    const u = Math.min(1, Math.max(0, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / (dx * dx + dy * dy)));
+    return Math.hypot(p[0] - a[0] - u * dx, p[1] - a[1] - u * dy);
+  };
+  const toCoast = (p) => land.reduce((best, a, i) => Math.min(best, toSegment(p, a, land[(i + 1) % land.length])), Infinity);
+  assert.ok(Math.min(...t.bands[0].ring.map(toCoast)) >= 100);
+  assert.ok(Math.max(...t.bands[0].ring.map((p) => p[0])) > 4700);
+  // The lake in the crater is kept, and the pond is not.
+  assert.equal(t.lakes.length, 1);
+  assert.ok(Math.abs(radius(t.lakes[0].ring) - 600) < 40 && pointInRing([0, 0], t.lakes[0].ring));
+  // The river is one line from its first point to the coast, and no further.
+  assert.deepEqual(t.rivers.map((r) => [r.id, r.name, r.lines.length]), [['river-testwater', 'Testwater', 1]]);
+  const line = t.rivers[0].lines[0];
+  assert.deepEqual(line[0], [1000, 0]);
+  assert.ok(Math.abs(line[line.length - 1][0] - 5000) <= 50 && Math.abs(lengthOf(line) - 4044) < 60);
+  // The same inputs give the same layer; a spec with no levels gets those its ground reaches.
+  assert.equal(JSON.stringify(buildTerrain(spec, frame, { heightAt, seaAt, lakeAt, osm })), JSON.stringify(t));
+  const plain = buildTerrain({ cell: 100 }, frame, { heightAt, seaAt });
+  assert.deepEqual([plain.levels, plain.lakes.length, plain.rivers.length], [[25, 50, 100, 200], 0, 0]);
+  // The sea may come as polygons instead, an island a hole in one: the land is the same island.
+  const circle = Array.from({ length: 48 }, (_, k) => proj.inverse([5000 * Math.cos((k / 24) * Math.PI), 5000 * Math.sin((k / 24) * Math.PI)]));
+  const square = [[-9000, -9000], [9000, -9000], [9000, 9000], [-9000, 9000]].map(proj.inverse);
+  const drawn = buildTerrain({ cell: 100, levels: [50] }, frame, { heightAt, seaRings: [[square, circle]] });
+  assert.ok(drawn.land.length === 1 && Math.abs(radius(drawn.land[0].ring) - 5000) < 60 && drawn.bands.length === 1);
+  // A lake the spec leaves out is named by a place on it, and a place with no lake is an error.
+  assert.equal(buildTerrain({ ...spec, lakes: { skip: [[10, 45]] } }, frame, { heightAt, seaAt, lakeAt }).lakes.length, 0);
+  assert.throws(() => buildTerrain({ ...spec, lakes: { skip: [proj.inverse([3000, 3000])] } }, frame, { heightAt, seaAt, lakeAt }), /no lake/);
+  assert.throws(() => buildTerrain({ cell: 100, levels: [100, 50] }, frame, { heightAt, seaAt }), /each above the one before/);
+  // The grid is laid out by the scale: about 800 cells from south to north, and tiles are read as far as the smoothing reaches.
+  assert.deepEqual([terrainCell(frame.box), terrainCell([0, 0, 160000, 96000])], [30, 120]);
+  assert.deepEqual(terrainPlan({ cell: 100 }, frame.box), { cell: 100, smooth: 200, waterCell: 50, reach: [-7800, -7800, 7800, 7800] });
+});
+
 test('built-up: the body round the centre is the outline, and what a strait parts from it comes as a piece', () => {
   const proj = projection({ lon: 10, lat: 45 });
   const frame = { proj, box: [-6000, -4000, 6000, 4000] };
@@ -356,6 +460,20 @@ test('build: a new city starts from its box and years, and the requests and the 
   assert.deepEqual(requestsOf(asking, framesOf(asking)), requests);
   assert.equal(stringify(spec), stringify(JSON.parse(stringify(spec))));
   assert.ok(stringify(spec).endsWith('}\n'));
+  // With a wider box round the first, the city also gets a wide view and its terrain.
+  const far = scaffold({ city: 'testville', name: 'Testville', bbox: [10, 44.8, 10.6, 45.2], wide: [9.4, 44.4, 11.2, 45.6] });
+  assert.deepEqual([far.views, far.terrain], [{ metro: [10, 44.8, 10.6, 45.2], wide: [9.4, 44.4, 11.2, 45.6] }, { view: 'wide' }]);
+  assert.deepEqual(Object.keys(framesOf(far).city.views), ['metro', 'wide']);
+  assert.deepEqual(requestsOf(far, framesOf(far)), {});
+  assert.throws(() => scaffold({ city: 'x', name: 'X', bbox: [10, 44.8, 10.6, 45.2], wide: [10.1, 44.4, 11.2, 45.6] }), /a box that holds --bbox/);
+  // The rivers of a terrain are asked for by name alone, in the wide box, from the source the spec names.
+  const rivered = { ...far, terrain: { view: 'wide', rivers: { from: 'ohm', list: ['Po', { id: 'old', name: 'Old Canal', match: '^(Old|Great) Canal$' }] } } };
+  const asked = requestsOf(rivered, framesOf(rivered))['terrain-rivers'];
+  assert.deepEqual([asked.source, asked.id], ['ohm', 'testville-ohm-terrain-rivers']);
+  assert.equal(asked.query.match(/way\["waterway"~"\^\(river\|canal\)\$"\]/g).length, 4);
+  assert.ok(asked.query.includes('["name"~"^Po$"]') && asked.query.includes('["name:en"~"^(Old|Great) Canal$"]') && asked.query.includes('(44.4,9.4,45.6,11.2)'));
+  assert.equal(requestsOf({ ...rivered, terrain: { view: 'wide', rivers: { list: ['Po'] } } }, framesOf(rivered))['terrain-rivers'].source, 'osm');
+  assert.throws(() => requestsOf({ ...rivered, terrain: { view: 'wide', rivers: { from: 'atlas', list: ['Po'] } } }, framesOf(rivered)), /"osm" or "ohm"/);
 });
 
 test('build: a project of its own names its command, its paragraphs and its sources in SOURCES.md', () => {
@@ -372,6 +490,13 @@ test('build: a project of its own names its command, its paragraphs and its sour
   assert.ok(own.includes('| `city.epochs: old` | Drawn for this project |'));
   // The table itself is not changed by a user's copy of it, and a source it lacks is refused.
   assert.equal(licencesWith().own.name, 'Drawn by hand');
+  // A coast of the ancient world comes from a file of its repository, named by its path there, and is credited.
+  assert.ok(licencesWith().awmc.required && licencesWith().awmc.licence === 'ODbL 1.0');
+  assert.ok(licencesWith().copernicus.credit.includes('produced using Copernicus WorldDEM-30'));
+  assert.equal(awmcName('Some Folder/OW_Inner_Sea.geojson'), 'ow-inner-sea');
+  assert.throws(() => awmc({ cache: '.', file: '../OW_Inner_Sea.geojson', offline: true }), /bad file/);
+  assert.throws(() => awmc({ cache: '.', file: 'Some Folder/OW_Inner_Sea.shp', offline: true }), /bad file/);
+
   assert.throws(() => licencesWith({ almanac: { name: 'An almanac' } }), /no source "almanac"/);
 });
 

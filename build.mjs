@@ -6,7 +6,8 @@
 //   node build.mjs <city> --offline   from the cache alone: nothing is fetched
 //   node build.mjs <city> --update    takes downloads that differ from the lock, and rewrites it
 //   node build.mjs <city> --new --name <Name> --bbox <west,south,east,north> [--country <ISO A3>]
-//        [--centre <lon,lat>] [--years 1975,2000,2020]     writes the spec of a new city, then builds it
+//        [--centre <lon,lat>] [--years 1975,2000,2020] [--wide <west,south,east,north>]
+//                                     writes the spec of a new city, then builds it
 //   --root <dir>                      where the cities are kept (the working directory)
 //
 // A project that keeps its own cities calls `run(argv, { root, command, sources, notes })` from a
@@ -26,16 +27,16 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { readGeoTiff, readHgt, sampler, seaTile, waterSampler } from './lib/dem.mjs';
+import { readGeoTiff, readHgt, reduceTile, sampler, scaleOf, seaTile, waterSampler, waterShare } from './lib/dem.mjs';
 import { builtShare, GHSL_RELEASE, GHSL_YEARS, ghslTile, ghslTilesOf, ghslUrl, mollweideBox } from './lib/ghsl.mjs';
 import { area } from './lib/geom.mjs';
 import { readRaster } from './lib/tiff.mjs';
 import { unzip } from './lib/zip.mjs';
 import { overpass } from './lib/fetch.mjs';
-import { areasOfAnswer, buildBuiltUp, buildEpochs, buildLandmarks, buildRegion, buildRelief, buildStreets, buildWall, buildWater, urbanAreas } from './lib/layers.mjs';
+import { areasOfAnswer, buildBuiltUp, buildEpochs, buildLandmarks, buildRegion, buildRelief, buildStreets, buildTerrain, buildWall, buildWater, featuresOf, riverOf, terrainPlan, urbanAreas } from './lib/layers.mjs';
 import { centreOf, overpassBox, overpassDate, readOverpass, waysOf } from './lib/osm.mjs';
 import { projectBox, projection, unprojectBox } from './lib/project.mjs';
-import { copernicusTile, copernicusWaterMask, licencesWith, NATURAL_EARTH_VERSION, naturalEarth, tilesOf } from './lib/sources.mjs';
+import { awmc, AWMC_COMMIT, awmcName, copernicusTile, copernicusWaterMask, licencesWith, NATURAL_EARTH_VERSION, naturalEarth, tilesOf } from './lib/sources.mjs';
 
 /** The layers file, written the same way every time: objects opened to the level of a feature, its points on one line. */
 export function stringify(value) {
@@ -63,18 +64,21 @@ const numbers = (text, count, what) => {
  * The spec a new city starts from: its box as the one view, the region round it, water from the
  * water mask of the elevation model, contour lines, and the built-up city of each year asked for
  * as its epochs. Everything in it comes from sources that cover the whole world, so it builds for
- * any city; walls, hills, landmarks and the epochs before 1975 are then added by hand.
+ * any city; walls, hills, landmarks and the epochs before 1975 are then added by hand. With `wide`, a
+ * second box round the first, the city also gets a wide view of the country it stands in, and its
+ * terrain: the land, the lakes and the ground in bands of height.
  */
-export function scaffold({ city, name, bbox, centre = null, country = null, years = [1975, 2000, 2020] }) {
+export function scaffold({ city, name, bbox, centre = null, country = null, years = [1975, 2000, 2020], wide = null }) {
   const [w, s, e, n] = bbox;
   if (!(w < e && s < n && w >= -180 && e <= 180 && s > -85 && n < 85)) throw new Error('build: --bbox is west,south,east,north in degrees');
+  if (wide && !(wide[0] <= w && wide[1] <= s && wide[2] >= e && wide[3] >= n && wide[0] >= -180 && wide[2] <= 180 && wide[1] > -85 && wide[3] < 85)) throw new Error('build: --wide is west,south,east,north in degrees, a box that holds --bbox');
   for (const year of years) if (!GHSL_YEARS.includes(year)) throw new Error(`build: no built-up layer of ${year} (there are ${GHSL_YEARS.join(', ')})`);
   const at = centre ?? [Math.round(((w + e) / 2) * 1e4) / 1e4, Math.round(((s + n) / 2) * 1e4) / 1e4];
   return {
     city,
     name,
     centre: at,
-    views: { metro: bbox },
+    views: { metro: bbox, ...(wide ? { wide } : {}) },
     region: {
       centre: at,
       bbox: [Math.round(at[0] - 9), Math.round(at[1] - 5.5), Math.round(at[0] + 9), Math.round(at[1] + 5.5)],
@@ -84,6 +88,7 @@ export function scaffold({ city, name, bbox, centre = null, country = null, year
     },
     water: { view: 'metro', from: ['copernicus'], mask: ['ocean', 'lake', 'river'], cell: 15 },
     relief: { view: 'metro', cell: 60, smooth: 180, contours: { step: 50 } },
+    ...(wide ? { terrain: { view: 'wide' } } : {}),
     builtUp: { view: 'metro', from: 'ghsl', years, cell: 50, share: 0.2, bridge: 350, round: 2.5 },
     epochs: years.map((year) => ({
       id: `y${year}`,
@@ -149,6 +154,15 @@ export function requestsOf(spec, frames) {
       };
     }
   }
+  if (spec.terrain?.rivers) {
+    // Only the rivers wanted are asked for, by their names: a wide box holds every stream of a country.
+    const b = overpassBox(boxOfLayer(spec.terrain, frames).lonlat);
+    const source = spec.terrain.rivers.from ?? 'osm';
+    if (source !== 'osm' && source !== 'ohm') throw new Error(`terrain: "rivers.from" is "osm" or "ohm", not "${source}"`);
+    const quoted = (text) => text.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    const lines = (spec.terrain.rivers.list ?? []).map(riverOf).flatMap((r) => ['name', 'name:en'].map((key) => `way["waterway"~"^(river|canal)$"]["${key}"~"${quoted(r.match)}"](${b});`));
+    out['terrain-rivers'] = { source, id: `${spec.city}-${source}-terrain-rivers`, query: ql(lines, 'out geom;') };
+  }
   if (spec.streets) {
     const b = overpassBox(boxOfLayer(spec.streets, frames).lonlat);
     const source = spec.streets.from ?? 'osm';
@@ -191,10 +205,10 @@ const SOURCE_NAME = { osm: 'OpenStreetMap', ohm: 'OpenHistoricalMap' };
  *   notes     paragraphs of the user's own for SOURCES.md, set after the table of credits
  */
 export async function run(argv, { root = process.cwd(), command = 'build.mjs', sources = {}, notes: paragraphs = [] } = {}) {
-  const { values, positionals } = parseArgs({ args: argv, allowPositionals: true, options: { offline: { type: 'boolean' }, update: { type: 'boolean' }, preview: { type: 'boolean' }, root: { type: 'string' }, cache: { type: 'string' }, new: { type: 'boolean' }, name: { type: 'string' }, bbox: { type: 'string' }, centre: { type: 'string' }, country: { type: 'string' }, years: { type: 'string' } } });
+  const { values, positionals } = parseArgs({ args: argv, allowPositionals: true, options: { offline: { type: 'boolean' }, update: { type: 'boolean' }, preview: { type: 'boolean' }, root: { type: 'string' }, cache: { type: 'string' }, new: { type: 'boolean' }, name: { type: 'string' }, bbox: { type: 'string' }, centre: { type: 'string' }, country: { type: 'string' }, years: { type: 'string' }, wide: { type: 'string' } } });
   const city = positionals[0];
   if (!city || !/^[a-z][a-z0-9-]*$/.test(city)) {
-    console.error(`usage: node ${command} <city> [--preview] [--offline] [--update]\n       node ${command} <city> --new --name <Name> --bbox <west,south,east,north> [--country <ISO A3>] [--centre <lon,lat>] [--years 1975,2000,2020] [--preview]`);
+    console.error(`usage: node ${command} <city> [--preview] [--offline] [--update]\n       node ${command} <city> --new --name <Name> --bbox <west,south,east,north> [--country <ISO A3>] [--centre <lon,lat>] [--years 1975,2000,2020] [--wide <west,south,east,north>] [--preview]`);
     return 2;
   }
   const home = resolve(values.root ?? root);
@@ -210,7 +224,7 @@ export async function run(argv, { root = process.cwd(), command = 'build.mjs', s
       console.error('build: --new needs --name and --bbox');
       return 2;
     }
-    const made = scaffold({ city, name: values.name, bbox: numbers(values.bbox, 4, '--bbox'), centre: values.centre ? numbers(values.centre, 2, '--centre') : null, country: values.country ?? null, ...(values.years ? { years: numbers(values.years, 0, '--years') } : {}) });
+    const made = scaffold({ city, name: values.name, bbox: numbers(values.bbox, 4, '--bbox'), centre: values.centre ? numbers(values.centre, 2, '--centre') : null, country: values.country ?? null, ...(values.years ? { years: numbers(values.years, 0, '--years') } : {}), wide: values.wide ? numbers(values.wide, 4, '--wide') : null });
     writeFileSync(specFile, stringify(made));
     console.log(`wrote cities/${city}.json`);
   }
@@ -229,8 +243,9 @@ export async function run(argv, { root = process.cwd(), command = 'build.mjs', s
   const log = (line) => console.log(line);
   const offline = values.offline ?? false;
 
-  /** Notes a download in the lock, and holds it to the lock that was. */
+  /** Notes a download in the lock, once however many layers read it, and holds it to the lock that was. */
   const note = (id, source, request, got, dataDate = null) => {
+    if (lock.some((d) => d.id === id && d.request === request)) return got.path;
     const was = oldLock.downloads.find((d) => d.id === id && d.request === request);
     if (was && was.sha256 !== got.sha256 && !values.update) {
       throw new Error(`build: the download "${id}" differs from sources.lock.json (${got.sha256.slice(0, 12)} against ${was.sha256.slice(0, 12)}): the source has changed. Run with --update to take it, or restore the cache.`);
@@ -365,6 +380,92 @@ export async function run(argv, { root = process.cwd(), command = 'build.mjs', s
     log(`  relief: contours ${relief.contours.map((c) => `${c.height} m (${c.rings.length + c.lines.length})`).join(', ')}; hills ${relief.hills.map((h) => `${h.id} ${h.height} m ${h.areaHa} ha`).join(', ')}`);
   }
 
+  if (spec.terrain) {
+    const t = spec.terrain;
+    const { box } = boxOfLayer(t, frames);
+    const plan = terrainPlan(t, box);
+    const coast = t.coast?.from ?? 'copernicus';
+    if (coast !== 'copernicus' && coast !== 'awmc') throw new Error(`terrain: "coast.from" is "copernicus" or "awmc", not "${coast}"`);
+    const lakesWanted = t.lakes !== false;
+    // The tiles are read by the scale: reduced in blocks, so that a cell is the mean of the ground it covers.
+    const heights = [];
+    const seas = [];
+    const lakes = [];
+    const open = [];
+    let read = { factor: 1, samples: 1 };
+    let fine = { factor: 1, samples: 1 };
+    for (const [lon, lat] of tilesOf(unprojectBox(frames.city.proj, plan.reach))) {
+      const got = await copernicusTile({ cache, lon, lat, offline, log });
+      if (got) {
+        const tile = readGeoTiff(readFileSync(note(`copernicus-glo30-${lat}-${lon}`, 'copernicus', got.url, got, '2011-2015')));
+        read = scaleOf(tile, plan.cell);
+        heights.push(reduceTile(tile, read.factor));
+      }
+      if (coast !== 'copernicus' && !lakesWanted) continue;
+      const mask = await copernicusWaterMask({ cache, lon, lat, offline, log });
+      if (!mask) {
+        // No mask where there is no land at all: a degree of open sea, read after every tile there is.
+        open.push(waterShare(seaTile(lon, lat), ['ocean']));
+        continue;
+      }
+      const tile = readGeoTiff(readFileSync(note(`copernicus-wbm-${lat}-${lon}`, 'copernicus', mask.url, mask, '2011-2015')));
+      fine = scaleOf(tile, plan.waterCell);
+      if (coast === 'copernicus') seas.push(reduceTile(waterShare(tile, ['ocean']), fine.factor));
+      if (lakesWanted) lakes.push(reduceTile(waterShare(tile, ['lake']), fine.factor));
+    }
+    let seaRings = null;
+    if (coast === 'awmc') {
+      if (!t.coast.file) throw new Error('terrain: a coast from "awmc" names its "file", the path of a GeoJSON file of open water in the repository of the Ancient World Mapping Center');
+      const got = await awmc({ cache, file: t.coast.file, offline, log });
+      const path = note(`awmc-${awmcName(t.coast.file)}`, 'awmc', got.url, got, 'undated: the coast as the Center reconstructs it for antiquity');
+      const lonlat = unprojectBox(frames.city.proj, plan.reach);
+      seaRings = [];
+      for (const f of featuresOf(path)) {
+        const polys = f.geometry?.type === 'Polygon' ? [f.geometry.coordinates] : f.geometry?.type === 'MultiPolygon' ? f.geometry.coordinates : [];
+        for (const poly of polys) {
+          const rings = poly.map((r) => r.slice(0, -1)).filter((r) => r.length >= 3);
+          if (rings.length === 0) continue;
+          const xs = rings[0].map((p) => p[0]);
+          const ys = rings[0].map((p) => p[1]);
+          const [x0, y0, x1, y1] = [xs.reduce((a, b) => Math.min(a, b)), ys.reduce((a, b) => Math.min(a, b)), xs.reduce((a, b) => Math.max(a, b)), ys.reduce((a, b) => Math.max(a, b))];
+          if (x0 <= lonlat[2] && x1 >= lonlat[0] && y0 <= lonlat[3] && y1 >= lonlat[1]) seaRings.push(rings);
+        }
+      }
+      if (seaRings.length === 0) throw new Error(`terrain: ${t.coast.file} has no water in the view: another file of the same repository covers this sea`);
+    }
+    const riversFrom = t.rivers ? t.rivers.from ?? 'osm' : null;
+    const terrain = buildTerrain(t, { ...frames.city, box }, {
+      heightAt: sampler(heights),
+      heightSamples: read.samples,
+      seaAt: coast === 'copernicus' ? sampler([...seas, ...open], 0) : null,
+      seaRings,
+      lakeAt: lakesWanted ? sampler(lakes, 0) : null,
+      waterSamples: fine.samples,
+      [riversFrom ?? 'osm']: answers['terrain-rivers'] ?? [],
+    });
+    for (const line of terrain.lost) log(`  terrain: left out, it could not be drawn without crossing itself: ${line}`);
+    const { lost, ...layer } = terrain;
+    void lost;
+    cityLayers.terrain = { ...(t.view ? { view: t.view } : {}), ...layer };
+    const blocks = read.factor > 1 ? `read in blocks of ${read.factor} by ${read.factor} samples, ` : '';
+    use('city.terrain', 'copernicus', `Copernicus DEM GLO-30 (a surface model: it includes buildings and trees), ${blocks}as the mean height of each cell of ${plan.cell} m, smoothed over ${plan.smooth} m: the ground in bands at ${terrain.levels.join(', ')} m${lakesWanted ? '; the lakes from its water body mask' : ''}${coast === 'copernicus' ? '; the coast from the same mask (the sea of 2011-2015)' : ''}`);
+    if (coast === 'awmc') use('city.terrain', 'awmc', `the coast: the open water of the Ancient World Mapping Center, \`${t.coast.file}\` at commit ${AWMC_COMMIT.slice(0, 12)}`);
+    if (riversFrom) use('city.terrain', riversFrom, `river lines of ${SOURCE_NAME[riversFrom]}, by name: ${terrain.rivers.map((r) => r.name).join(', ') || 'none found'}`);
+    notes.push({
+      layer: 'city.terrain',
+      name: 'Terrain',
+      source: t.source ?? '',
+      made: [
+        'the heights are those of today (the model was measured in 2011-2015), whatever the age of the coast and the rivers drawn with them',
+        'no band comes nearer the sea than about a cell, so a cliff keeps a rim of the land below it',
+        ...(coast === 'copernicus' ? ['the coast is that of 2011-2015'] : []),
+        ...(t.coast?.note ? [t.coast.note] : []),
+        ...(t.lakes?.skip?.length ? [`${t.lakes.skip.length} lake(s) of the water mask left out by the spec${t.lakes.note ? `: ${t.lakes.note}` : ''}`] : []),
+      ],
+    });
+    log(`  terrain: cell ${plan.cell} m; land ${terrain.land.length} ring(s); bands ${terrain.levels.map((level) => `${level} m (${terrain.bands.filter((b) => b.height === level).length})`).join(', ')}; lakes ${terrain.lakes.length}; rivers ${terrain.rivers.map((r) => `${r.name} ${r.lengthKm} km`).join(', ') || 'none'}; ${[...terrain.land, ...terrain.bands, ...terrain.lakes].reduce((n, f) => n + f.ring.length, 0)} points`);
+  }
+
   if (spec.streets) {
     const { box } = boxOfLayer(spec.streets, frames);
     const source = spec.streets.from ?? 'osm';
@@ -452,7 +553,8 @@ export async function run(argv, { root = process.cwd(), command = 'build.mjs', s
  */
 export function sourcesText(spec, lock, used, notes, { licences: LICENCES = licencesWith(), command = 'build.mjs', paragraphs = [] } = {}) {
   const sources = [...new Set([...used.values()].flat().map((u) => u.source))].filter((s) => s !== 'own');
-  const order = ['osm', 'copernicus', 'ohm', 'natural-earth', 'srtm'];
+  const order = ['osm', 'awmc', 'copernicus', 'ohm', 'natural-earth', 'srtm'];
+
   sources.sort((a, b) => order.indexOf(a) - order.indexOf(b));
   const lines = [
     `# ${spec.name}: the sources of its map`,
