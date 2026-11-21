@@ -1,12 +1,13 @@
 # skink3-geo
 
-Real geographic data turned into the simplified vector layers a city's map is drawn from: the country round it, the terrain of its surroundings in bands of height, the sea and the rivers in their true width, the relief, walls, main streets, the built-up land, and the city's outline through time, ready to grow from one epoch into the next; and a round body for a globe, the Earth or the Moon, in degrees. One spec a city, one command, and the same bytes every time, with the credit of every source written out.
+Real geographic data turned into the simplified vector layers a city's map is drawn from: the country round it, the terrain of its surroundings in bands of height, the sea and the rivers in their true width, the relief, walls, main streets, the built-up land, and the city's outline through time, ready to grow from one epoch into the next; a round body for a globe, the Earth or the Moon, in degrees; and a flat map of the whole world, or of the countries round a place, with the outline of every country. One spec a city, one command, and the same bytes every time, with the credit of every source written out.
 
 It is made for animated maps (the scenes of [skink3-engine](https://github.com/DanilZabolotskiy/skink3-engine) among them), but it draws nothing and depends on no renderer: its output is one JSON file of points in metres (in degrees, for a globe).
 
 ```
 build.mjs, lib/             the pipeline: plain Node, no package needed to build
 globe.mjs                   a round body for a globe, the Earth or the Moon, in degrees ("A globe")
+world.mjs                   a flat map of the world or of a box, every country with its borders ("A world map")
 map.ts                      for a scene: the types of the layers, loading, the fit into a stage
 test/                       the tests
 examples/                   a root of cities, with one small city built: Valletta
@@ -15,6 +16,7 @@ examples/                   a root of cities, with one small city built: Vallett
   <city>/SOURCES.md         where each layer comes from, what was drawn by hand, the credit lines
   <city>/sources.lock.json  every download: its request, its SHA-256, its size, its date
   earth/, moon/             the Earth at 1:110m and the Moon, for a globe, each with its SOURCES.md and its lock
+  world/, slovenia/         the whole world at 1:50m, and the countries round Slovenia at 1:10m, for flat maps
   cache/, out/              not in git: the raw downloads, and the previews
 ```
 
@@ -181,6 +183,44 @@ globeFaults(earth);                                                         // [
 
 A project builds its own globes with `runGlobe(argv, { root, command })` from `skink3-geo/globe.mjs`, as it builds its cities with `run`. `lib/shapefile.mjs` reads the polygons and fields of an ESRI shapefile, which is how the mare boundaries come.
 
+## A world map
+
+`world.mjs` builds a flat map with the outline of every country, from Natural Earth's admin-0 countries (public domain): the whole world at once, or the countries of a box round a place. The whole world is drawn on the Equal Earth projection, whose parallels are straight and whose areas are true, every continent in a shape one knows; a box on the plane of a city's region (Lambert's azimuthal equal-area round its middle), so a map of a country among its neighbours lies on the same plane as the cities in it.
+
+```
+node world.mjs --root examples --lakes 2 --preview                                   # the whole world at 1:50m: examples/world/
+node world.mjs --map slovenia --name Slovenia --bbox 8.5,42.6,21.5,49.6 --lakes 6 --root examples   # a box at 1:10m: examples/slovenia/
+node world.mjs --offline                                                             # from the cache alone; --update takes a changed source
+```
+
+- `--scale` is that of Natural Earth: 50 for the world, 10 for a box by default. `--detail` thins the outlines to that many metres (by default half a unit of a 1920 by 1080 stage that the map covers), `--min-area` leaves out islands smaller than that many km² (by default a square six times `--detail` on a side), but every country keeps its largest piece, so the smallest states stay. `--lakes` takes the lakes up to that rank of Natural Earth (0 the largest alone); there are none without it. `--centre` moves the middle of a box's plane.
+- **Thinned together.** The countries are cut into arcs where a shared border begins and ends, each arc is thinned once and every country is put together again from its arcs (`lib/topology.mjs`), so two neighbours share their border point for point, with no gap and no overlap. Where thinning makes a ring cross itself the arcs there are thinned less, down to not at all; where the data itself crosses, the point that makes it cross is taken out, and `SOURCES.md` counts them.
+- **The land is the countries as one:** the arcs that one country alone runs along are the coast. A box's layers are cut along its edge.
+
+`world.json`, format `world-geo/1`, holds `made` (the options as used) and `frame`, then its layers, an entry a line, in metres on the plane of the frame, x east and y north. Every ring runs counter-clockwise and none crosses itself.
+
+| Key | What |
+|---|---|
+| `frame` | `{ projection, centre, box, lonlat }`: `equal-earth` round 0° 0° for the world, with its `outline`, the edge of the world, a ring the sea fills; `laea` round `centre` for a box |
+| `land[]` | `{ id, ring }`: all the land, the largest first |
+| `gaps[]` | `{ id, ring }`: water inside the land that no country holds (the Caspian Sea), painted over the land |
+| `countries[]` | `{ id, name, iso?, continent, label, areaKm2, rings }`, the largest first: `id` is Natural Earth's code in lower case (`fra`), `iso` the ISO 3166-1 alpha-3 code where the country has one of its own, `label` a point inside its main land, `rings` its pieces, the largest first. An enclave is a country of its own, painted after the one round it |
+| `boundaries[]` | `{ id, between, lines }`: each land border once, between two countries (`between`, their ids in order; `id` is `a-b`), as lines |
+| `lakes[]` | `{ id, name, ring }`: the lakes asked for, the largest first, painted over the countries |
+
+```ts
+import { fitView, loadWorld, toFrame, worldFaults, worldOnStage } from 'skink3-geo';
+
+const world = loadWorld(new URL('./world/world.json', import.meta.url));
+const view = fitView(world.frame.box, { w: 1800, h: 1000 }, { mode: 'contain' });   // the whole world on the stage
+const map = worldOnStage(view, world);                  // { sea, land, gaps, countries, borders, lakes } in stage units
+const fr = map.countries.find((c) => c.id === 'fra')!;  // its rings, and its label on the stage
+const paris = view.project(toFrame(world.frame)([2.35, 48.86]));                      // a place on the map
+worldFaults(world);                                                                  // [] when it keeps to the format
+```
+
+`worldOnStage(view, world, { detail?, minArea?, margin? })` fits the map to the stage as the map was built: the countries cut to the view and its margin (120 units) and thinned together again to `detail` (0.3 units), so a border is the same points in both its countries and in its line of `borders`, and an enclave borders the country round it; islands and lakes under `minArea` (2 square units) are left out, but a country keeps its largest piece while it covers anything on the stage (on the whole world 1800 wide, only the Vatican is lost). No outline crosses itself, even where a narrow spit comes closer than the stage's tenths: there a point is taken out of the outline alone, and its border is no longer shared exactly at that spot. Each is the `points` of a flat region: the whole world on a stage 1800 wide takes about 3200 points for its largest land, within the 4000 of a flat region. `ringsOnStage` and `linesOnStage` thin each outline alone, so neighbours drawn with them can part by a hairline, and `ringsOnStage` leaves out a ring that the stage's tenths would make cross itself (the largest lands of the whole world); `ringsInTiles` serves a country larger than a renderer's limit. A project builds its own maps with `runWorld(argv, { root, command })` from `skink3-geo/world.mjs`; a world for a small inset is built with a larger `--detail`.
+
 ## The spec
 
 `examples/cities/valletta.json` is what the command for a new city writes. A spec may ask for more:
@@ -213,6 +253,7 @@ Only open data is read. The table of sources is `lib/sources.mjs`; a source come
 |---|---|---|---|
 | Natural Earth 5.1.2, 1:10m | the region | public domain | not required |
 | Natural Earth 5.1.2, 1:50m and 1:110m land, lakes, glaciated areas, Antarctic ice shelves, and 1:10m populated places | the Earth for a globe (`globe.mjs`) | public domain | not required |
+| Natural Earth 5.1.2, 1:10m, 1:50m and 1:110m admin-0 countries and lakes | a world map (`world.mjs`) | public domain | not required |
 | LROC Global Mare Boundaries (Nelson et al. 2014), in NASA's Planetary Data System | the Moon's maria for a globe | public domain | not required, the line in `SOURCES.md` |
 | Copernicus DEM GLO-30 and its water body mask | relief and terrain; sea, lakes and wide rivers | free with attribution | **required**, the line in `SOURCES.md` |
 | Global Human Settlement Layer, GHS-BUILT-S R2023A (European Commission, JRC) | the built-up city of 1975 to today | free and open, reuse with acknowledgment of the source | **required**, the line in `SOURCES.md` |
@@ -229,7 +270,7 @@ Only open data is read. The table of sources is `lib/sources.mjs`; a source come
 
 ## The tests
 
-`test/geom.test.ts` holds the plane geometry and the projection; `test/pipeline.test.mjs` the readers (TIFF, BigTIFF, LZW, ZIP), the grids and contours, the hills, the tiles read by the scale, the terrain of an island made in the test, the grids of heights of a relief and a terrain, the built-up outline, walls, epochs, the spec of a new city and the options of a project of its own, all on inputs made in the test; `test/example.test.ts` holds the committed example to the format and to what `map.ts` makes of it on a stage, its terrain in tiles included; `test/stage.test.ts` the shores of water cut by a view, a grid of heights fitted to a stage, the height at a place, a fine grid eased into a coarse one, and the faults of a grid; `test/globe.test.ts` the committed Earth and Moon to their format, rings measured, oriented, made whole and thinned on the sphere, a shapefile made in the test, and globes built from collections made in the test. They download nothing.
+`test/geom.test.ts` holds the plane geometry and the projection; `test/pipeline.test.mjs` the readers (TIFF, BigTIFF, LZW, ZIP), the grids and contours, the hills, the tiles read by the scale, the terrain of an island made in the test, the grids of heights of a relief and a terrain, the built-up outline, walls, epochs, the spec of a new city and the options of a project of its own, all on inputs made in the test; `test/example.test.ts` holds the committed example to the format and to what `map.ts` makes of it on a stage, its terrain in tiles included; `test/stage.test.ts` the shores of water cut by a view, a grid of heights fitted to a stage, the height at a place, a fine grid eased into a coarse one, and the faults of a grid; `test/globe.test.ts` the committed Earth and Moon to their format, rings measured, oriented, made whole and thinned on the sphere, a shapefile made in the test, and globes built from collections made in the test; `test/world.test.ts` the committed world and box to their format, the Equal Earth projection, outlines thinned together, and maps built from collections made in the test. They download nothing.
 
 ## Rules
 

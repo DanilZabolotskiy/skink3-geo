@@ -1,0 +1,25 @@
+{
+  "format": "world-geo-lock/1",
+  "downloads": [
+    {
+      "id": "ne_10m_admin_0_countries",
+      "source": "natural-earth",
+      "licence": "public domain",
+      "request": "natural-earth 5.1.2 ne_10m_admin_0_countries.geojson",
+      "bytes": 13287234,
+      "sha256": "239eec57ac17f100a11e2536cffc56752c318b50ae765b0918ff7aab4ce8f255",
+      "retrieved": "2026-11-21",
+      "dataDate": "5.1.2"
+    },
+    {
+      "id": "ne_10m_lakes",
+      "source": "natural-earth",
+      "licence": "public domain",
+      "request": "natural-earth 5.1.2 ne_10m_lakes.geojson",
+      "bytes": 5043554,
+      "sha256": "2d036f53dedec578001c5c30c2959ee7d4eebc1306900fa4367c49929ec8f2d9",
+      "retrieved": "2026-11-21",
+      "dataDate": "5.1.2"
+    }
+  ]
+}

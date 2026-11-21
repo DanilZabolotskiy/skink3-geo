@@ -14,13 +14,16 @@
 //   const shore = shoresOnStage(view, town.city.water!.map((f) => f.ring));        // the shores, without the cut
 //
 // A round body for a globe (globe.mjs) is read the same way: `loadGlobe`, in degrees, for a renderer's own sphere.
+// A flat map of the world or of the countries of a box (world.mjs) is read with `loadWorld`, in metres on its frame's
+// plane, and put on the stage with `worldOnStage`, through the same views.
 //
 // This file draws nothing and names no colour: what a layer looks like is the scene's.
 
 import { readFileSync } from 'node:fs';
-import { area, clipLine, clipRing, crosses, dedupe, signedArea, simplify, type Box, type Point } from './lib/geom.mjs';
-import { projection, type LonLat } from './lib/project.mjs';
+import { area, clipLine, clipRing, crosses, dedupe, orient, pointInRing, signedArea, simplify, type Box, type Point } from './lib/geom.mjs';
+import { equalEarth, projection, type LonLat } from './lib/project.mjs';
 import { sphericalArea, wholeRing } from './lib/globe.mjs';
+import { thinTogether, untangle } from './lib/topology.mjs';
 
 export type { Box, LonLat, Point };
 export type Ring = Point[];
@@ -302,8 +305,129 @@ export function globeFaults(g: GlobeLayers): string[] {
   return out;
 }
 
-/** From [lon, lat] to the plane of a frame, for a place the layers do not hold. */
-export function toFrame(frame: Frame): (p: LonLat) => Point {
+/** A country of a world map. */
+export interface WorldCountry {
+  /** Natural Earth's code of the country, in lower case (`fra`): what a scene picks a country by. */
+  id: string;
+  name: string;
+  /** Its ISO 3166-1 alpha-3 code (`FRA`), where it has one of its own. */
+  iso?: string;
+  continent: string;
+  /** Where its name may stand: a point inside its main land, on the plane. */
+  label: Point;
+  /** Its area on the map, in km² (both projections keep areas true; a box's country is the part inside the box). */
+  areaKm2: number;
+  /** Its pieces of land, counter-clockwise, the largest first. An enclave is a country of its own, painted after the one round it. */
+  rings: Ring[];
+}
+
+export interface WorldFrame {
+  /** `equal-earth`: the whole world, round 0° 0°; `laea`: a box, on the plane of a city's region, round `centre`. */
+  projection: 'equal-earth' | 'laea';
+  centre: LonLat;
+  /** What the map covers, [x0, y0, x1, y1] in metres. */
+  box: Box;
+  lonlat: Box;
+  /** The whole world's alone: the edge of the world on the map, a ring the sea fills. */
+  outline?: Ring;
+}
+
+/**
+ * world.json as it is written by world.mjs: a flat map of the whole world, or of the countries of a box, in metres on
+ * the plane of its frame, x east and y north. Every ring runs counter-clockwise, and no ring crosses itself. The
+ * countries were thinned together, so two neighbours share their border point for point: painted one after the
+ * other, they leave no gap and no overlap, and the land is their outline as one. A box's layers are cut to its edge.
+ *
+ *   const world = loadWorld(new URL('./world/world.json', import.meta.url));
+ *   const view = fitView(world.frame.box, { w: 1920, h: 1080 }, { mode: 'contain' });
+ *   const map = worldOnStage(view, world);                       // the sea, land, countries, borders, lakes on the stage
+ *   const fr = map.countries.find((c) => c.id === 'fra')!;      // a country by its code: its rings, its label
+ *   const paris = view.project(toFrame(world.frame)([2.35, 48.86]));   // a place on the map
+ */
+export interface WorldLayers {
+  format: 'world-geo/1';
+  /** The name of its directory: `world`, or a box's own. */
+  id: string;
+  name: string;
+  units: string;
+  /** What it was built with: Natural Earth's scale, the thinning in metres, the least island in km², the largest rank of lake kept, and a box's degrees and centre. */
+  made: { scale: number; detail: number; minArea: number; lakes: number | null; bbox?: Box; centre?: LonLat };
+  frame: WorldFrame;
+  /** All the land, the countries as one, the largest first. */
+  land: { id: string; ring: Ring }[];
+  /** The water inside the land that no country holds (an inland sea), the largest first: painted over the land. */
+  gaps: { id: string; ring: Ring }[];
+  /** Every country, the largest first. */
+  countries: WorldCountry[];
+  /** Each land border once, between two countries (their ids in order), as lines; sorted by id, `a-b`. */
+  boundaries: { id: string; between: [string, string]; lines: Line[] }[];
+  /** The lakes of the ranks asked for, the largest first: painted over the countries. */
+  lakes: { id: string; name: string; ring: Ring }[];
+}
+
+/** A world map, read from world.json: a path, or a URL made from `import.meta.url`. */
+export function loadWorld(file: string | URL): WorldLayers {
+  const world = JSON.parse(readFileSync(file, 'utf8')) as WorldLayers;
+  if (world.format !== 'world-geo/1') throw new Error(`loadWorld: ${String(file)} is of format ${String(world.format)}, not world-geo/1`);
+  return world;
+}
+
+/**
+ * What is wrong with a world map, one line a fault; none when it keeps to the format: every point is finite and inside
+ * the frame's box, every ring has three points or more, runs counter-clockwise and does not cross itself, the
+ * countries and the rings of each layer come largest first, the ids are unique, and every border lies between two
+ * countries of the map.
+ */
+export function worldFaults(w: WorldLayers): string[] {
+  const out: string[] = [];
+  const [x0, y0, x1, y1] = w.frame.box;
+  const inBox = (pts: readonly Point[]): boolean => pts.every(([x, y]) => Number.isFinite(x) && Number.isFinite(y) && x >= x0 && x <= x1 && y >= y0 && y <= y1);
+  const ring = (at: string, r: Ring): void => {
+    if (r.length < 3) out.push(`${at}: ${r.length} points`);
+    else if (!inBox(r)) out.push(`${at}: a point outside the frame's box`);
+    else if (signedArea(r) <= 0) out.push(`${at}: runs clockwise`);
+    else if (crosses(r, true)) out.push(`${at}: crosses itself`);
+  };
+  const largestFirst = (at: string, list: readonly { id: string; ring: Ring }[]): void => {
+    for (const [k, f] of list.entries()) {
+      ring(`${at}.${f.id}`, f.ring);
+      if (k > 0 && area(f.ring) > area(list[k - 1]!.ring)) out.push(`${at}.${f.id}: larger than the ring before it`);
+    }
+  };
+  if (w.frame.outline) ring('frame.outline', w.frame.outline);
+  largestFirst('land', w.land);
+  largestFirst('gaps', w.gaps);
+  largestFirst('lakes', w.lakes);
+  const ids = new Set<string>();
+  for (const [k, c] of w.countries.entries()) {
+    if (ids.has(c.id)) out.push(`countries.${c.id}: twice`);
+    ids.add(c.id);
+    if (k > 0 && c.areaKm2 > w.countries[k - 1]!.areaKm2) out.push(`countries.${c.id}: larger than the country before it`);
+    if (c.rings.length === 0) out.push(`countries.${c.id}: no rings`);
+    for (const [j, r] of c.rings.entries()) {
+      ring(`countries.${c.id}.${j}`, r);
+      if (j > 0 && area(r) > area(c.rings[j - 1]!)) out.push(`countries.${c.id}.${j}: larger than the ring before it`);
+    }
+    if (!Number.isFinite(c.label[0]) || !Number.isFinite(c.label[1])) out.push(`countries.${c.id}: no label`);
+  }
+  const seen = new Set<string>();
+  for (const b of w.boundaries) {
+    const [p, q] = b.between;
+    if (seen.has(b.id)) out.push(`boundaries.${b.id}: twice`);
+    seen.add(b.id);
+    if (!(p < q) || b.id !== `${p}-${q}`) out.push(`boundaries.${b.id}: not the ids of its countries in order`);
+    if (!ids.has(p) || !ids.has(q)) out.push(`boundaries.${b.id}: between countries the map does not hold`);
+    for (const [j, l] of b.lines.entries()) {
+      if (l.length < 2) out.push(`boundaries.${b.id}.${j}: ${l.length} points`);
+      else if (!inBox(l)) out.push(`boundaries.${b.id}.${j}: a point outside the frame's box`);
+    }
+  }
+  return out;
+}
+
+/** From [lon, lat] to the plane of a frame, for a place the layers do not hold: a city's, a region's or a world map's. */
+export function toFrame(frame: Frame | WorldFrame): (p: LonLat) => Point {
+  if (frame.projection === 'equal-earth') return equalEarth().forward;
   return projection({ lon: frame.centre[0], lat: frame.centre[1] }).forward;
 }
 
@@ -595,4 +719,74 @@ export function morphOnStage(view: View, from: Epoch, to: Epoch): { from: Point[
   const b = to.morph.map(view.project);
   if (a.length !== b.length) throw new Error(`morphOnStage: ${from.id} has ${a.length} points, ${to.id} has ${b.length}`);
   return { from: a, to: b, at: (t) => a.map((p, k) => [tenth(p[0] + (b[k]![0] - p[0]) * t), tenth(p[1] + (b[k]![1] - p[1]) * t)]) };
+}
+
+export interface WorldStageOptions {
+  /** The least bend drawn, in stage units (0.3): the countries are thinned together to it, so neighbours keep one border. */
+  detail?: number;
+  /** Islands and lakes smaller than this on the stage, in square units, are left out (2); a country keeps its largest piece while it covers anything on the stage. */
+  minArea?: number;
+  /** How far past the stage's edge the map is kept, in stage units (120): room for a camera's drift and push. */
+  margin?: number;
+}
+
+/** A world map on the stage, as `worldOnStage` gives it: every outline in stage units, cut to the view and its margin. */
+export interface WorldOnStage {
+  /** The edge of the world, the sea's outline: a whole world's alone. */
+  sea: Point[][];
+  /** The land, the countries as one, the largest first. */
+  land: Point[][];
+  /** The water inside the land that no country holds. */
+  gaps: Point[][];
+  /** The countries the view holds, in the map's order (the largest first): an enclave after the country round it. */
+  countries: { id: string; name: string; label: Point; rings: Point[][] }[];
+  /** Each land border once, every one the view holds, an enclave's too. */
+  borders: { id: string; between: [string, string]; lines: Point[][] }[];
+  lakes: { id: string; name: string; rings: Point[][] }[];
+}
+
+/**
+ * A world map on the stage: its countries, land, borders, lakes and the sea, cut to the view (with its margin) and
+ * thinned together on the stage, as the map itself was thinned: a border is the same points in both its countries,
+ * so neighbours painted one after the other leave no seam, a border stroke lies exactly on their edges, and no
+ * outline crosses itself, even where a narrow spit of land comes closer than the stage's tenths (there a point is
+ * taken out of that outline alone). Each outline is the `points` of a flat `region` (up to 4000 points) or of a
+ * `stroke`. A country the view does not hold, or too small to cover anything on the stage, is left out.
+ */
+export function worldOnStage(view: View, world: WorldLayers, o: WorldStageOptions = {}): WorldOnStage {
+  const detail = o.detail ?? 0.3;
+  const minArea = o.minArea ?? 2;
+  if (!(detail > 0)) throw new Error(`worldOnStage: detail must be above 0, got ${detail}`);
+  const box = grown(view, o.margin ?? 120);
+  // The view's own map from the plane to the stage, without its rounding: the topology rounds once, at the end.
+  const [cx, cy] = [(view.box[0] + view.box[2]) / 2, (view.box[1] + view.box[3]) / 2];
+  const [ax, ay] = view.project([cx, cy]);
+  const raw = (p: readonly number[]): Point => [ax + (p[0]! - cx) * view.scale, ay - (p[1]! - cy) * view.scale];
+  const cut = (ring: Ring): Point[][] => clipRing(ring, box).map((piece) => piece.map(raw));
+  // An enclave is a hole in the country round it: so their border is found, and the land does not count it twice.
+  const holes = world.countries.map((): Ring[] => []);
+  for (const c of world.countries) {
+    if (c.rings.length !== 1 || !pointInRing(c.label, c.rings[0]!)) continue;
+    const round = world.countries.findIndex((d) => d !== c && d.areaKm2 > c.areaKm2 && d.rings.some((r) => pointInRing(c.label, r)));
+    if (round >= 0) holes[round]!.push(c.rings[0]!);
+  }
+  const shapes = world.countries.map((c, k) => ({
+    rings: [...c.rings.flatMap((r) => cut(r).map((points) => ({ points }))), ...holes[k]!.flatMap((r) => cut(r).map((points) => ({ points, hole: true })))],
+  }));
+  const t = thinTogether(shapes, { tol: detail, minArea, digits: 1 });
+  // On a small stage a few outlines still touch themselves in the stage's tenths: points are taken out of those alone.
+  const whole = (rings: Point[][]): Point[][] => rings.map((r) => (crosses(r, true) ? untangle(r) : r)).filter((r): r is Point[] => r !== null && r.length >= 3 && area(r) > 0);
+  const countries = world.countries
+    .map((c, k) => ({ id: c.id, name: c.name, label: view.project(c.label), rings: whole(t.shapes[k]!.rings) }))
+    .filter((c) => c.rings.length > 0);
+  const borders = t.borders
+    .map((b) => {
+      const [p, q] = [world.countries[b.a]!.id, world.countries[b.b]!.id].sort() as [string, string];
+      return { id: `${p}-${q}`, between: [p, q] as [string, string], lines: b.lines };
+    })
+    .sort((a, b) => (a.id < b.id ? -1 : 1));
+  const water = thinTogether(world.lakes.map((l) => ({ rings: cut(l.ring).map((points) => ({ points })) })), { tol: detail, digits: 1 });
+  const lakes = world.lakes.map((l, k) => ({ id: l.id, name: l.name, rings: whole(water.shapes[k]!.rings).filter((r) => area(r) >= minArea) })).filter((l) => l.rings.length > 0);
+  const sea = world.frame.outline ? cut(world.frame.outline).map((r) => dedupe(simplify(r, detail, true).map(([x, y]) => [tenth(x), tenth(y)] as Point), 0, true)) : [];
+  return { sea, land: whole(t.land).filter((r) => area(r) >= minArea), gaps: whole(t.gaps.map((r) => orient(r, true))).filter((r) => area(r) >= minArea), countries, borders, lakes };
 }

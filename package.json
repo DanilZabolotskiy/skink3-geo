@@ -2,7 +2,7 @@
   "name": "skink3-geo",
   "private": true,
   "version": "0.1.0",
-  "description": "Real geographic data turned into simplified vector map layers of a city: the country round it, water, relief, walls, streets, built-up land and the city's outline through time; and the Earth or the Moon for a globe. Deterministic, with the credit of every source.",
+  "description": "Real geographic data turned into simplified vector map layers of a city: the country round it, water, relief, walls, streets, built-up land and the city's outline through time; the Earth or the Moon for a globe; and a flat map of the world or of a box with the outline of every country. Deterministic, with the credit of every source.",
   "type": "module",
   "engines": {
     "node": ">=26"
@@ -11,6 +11,7 @@
     ".": "./map.ts",
     "./build.mjs": "./build.mjs",
     "./globe.mjs": "./globe.mjs",
+    "./world.mjs": "./world.mjs",
     "./lib/*": "./lib/*",
     "./package.json": "./package.json"
   },
@@ -18,6 +19,8 @@
     "build.mjs",
     "globe.mjs",
     "globe.d.mts",
+    "world.mjs",
+    "world.d.mts",
     "map.ts",
     "lib",
     "examples",

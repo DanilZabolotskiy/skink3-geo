@@ -15,3 +15,4 @@ export const EARTH_RADIUS: number;
 export function projection(centre: { lon: number; lat: number }): Projection;
 export function projectBox(proj: Projection, box: Box, steps?: number): Box;
 export function unprojectBox(proj: Projection, box: Box, steps?: number): Box;
+export function equalEarth(): Projection;
