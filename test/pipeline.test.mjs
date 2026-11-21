@@ -301,7 +301,15 @@ test('relief and terrain: a grid of heights on request, row by row from the nort
   const coarse = buildRelief({ cell: 30, smooth: 30, contours: [], grid: { cell: 90 } }, frame, heightAt).grid;
   assert.deepEqual([coarse.cols, coarse.rows, coarse.box], [34, 34, [-1500, -1470, 1470, 1500]]);
   assert.equal(buildRelief({ cell: 30, smooth: 30, contours: [] }, frame, heightAt).grid, undefined);
-  assert.throws(() => buildRelief({ cell: 30, contours: [], grid: { step: 5 } }, frame, heightAt), /"grid" is true, or \{ cell \}/);
+  assert.throws(() => buildRelief({ cell: 30, contours: [], grid: { step: 5 } }, frame, heightAt), /"grid" is true, or \{ cell, smooth \}/);
+  assert.throws(() => buildRelief({ cell: 30, contours: [], grid: { cell: 0 } }, frame, heightAt), /"grid" is true/);
+  // A grid smoothed apart from the lines: a ground with a sharp step keeps it sharper in a grid smoothed less.
+  const step = (lonlat) => (proj.forward(lonlat)[0] > 0 ? 50 : 0);
+  const across = (grid) => grid.values[50 * grid.cols + 51] - grid.values[50 * grid.cols + 49];
+  const soft = buildRelief({ cell: 30, smooth: 300, contours: [], grid: true }, frame, step).grid;
+  const sharp = buildRelief({ cell: 30, smooth: 300, contours: [], grid: { smooth: 30 } }, frame, step).grid;
+  assert.ok(across(sharp) > across(soft) * 2, `${across(sharp)} against ${across(soft)}`);
+  assert.equal(buildRelief({ cell: 30, smooth: 300, contours: [], grid: { smooth: 300 } }, frame, step).grid.values.join(), soft.values.join());
   // A terrain's grid covers the box of its view, from the ground its bands are traced on.
   const wide = { proj, box: [-3000, -3000, 3000, 3000] };
   const hill = (lonlat) => {
@@ -313,6 +321,9 @@ test('relief and terrain: a grid of heights on request, row by row from the nort
   const top = t.grid.values.indexOf(Math.max(...t.grid.values));
   assert.deepEqual([top % 61, Math.floor(top / 61)], [30, 30]);
   assert.equal(buildTerrain({ cell: 100, levels: [100] }, wide, { heightAt: hill }).grid, undefined);
+  const own = buildTerrain({ cell: 100, levels: [100], grid: { smooth: 0 } }, wide, { heightAt: hill });
+  assert.notEqual(own.grid.values.join(), t.grid.values.join());
+  assert.equal(own.grid.values[30 * 61 + 30] > t.grid.values[30 * 61 + 30], true);
 });
 
 test('dem: a tile is read by the scale, in blocks that are the mean of their samples; a water mask becomes a share of water', () => {

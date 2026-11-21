@@ -3,7 +3,7 @@
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { faultsOf, fitView, gridOnStage, loadLayers, ringsOnStage, shoresOnStage, type HeightGrid, type Layers, type Point } from '../map.ts';
+import { blendGrid, faultsOf, fitView, gridOnStage, heightAt, loadLayers, ringsOnStage, shoresOnStage, type HeightGrid, type Layers, type Point } from '../map.ts';
 
 /** 41 by 31 points 100 m apart over [-2000, -1500, 2000, 1500]: the ground rises 1 m a metre to the north, 0.01 m a metre to the east. */
 function slope(): HeightGrid {
@@ -61,4 +61,34 @@ test('faultsOf: a grid of heights with too few heights, one that is not a number
   assert.match(faultsOf(withGrid({ ...good, values: good.values.slice(1) })).join('\n'), /city\.relief\.grid: 1270 heights for 41 by 31 points/);
   assert.match(faultsOf(withGrid({ ...good, values: [Number.NaN, ...good.values.slice(1)] })).join('\n'), /city\.relief\.grid: a height that is not a number/);
   assert.match(faultsOf(withGrid({ ...good, box: [-2000, -1500, 2100, 1500] })).join('\n'), /city\.relief\.grid: its points do not lie on the edges of its box/);
+});
+
+test('heightAt: the height between the four nearest points of a grid, null outside it', () => {
+  const g = slope();
+  assert.equal(heightAt(g, [0, 0]), 3000 - 1500 + 20);
+  assert.equal(heightAt(g, [-2000, 1500]), 3000);
+  assert.equal(heightAt(g, [-1950, 1500]), 3000.5);
+  assert.equal(heightAt(g, [-1950, 1450]), 2950.5);
+  assert.equal(heightAt(g, [2001, 0]), null);
+  assert.equal(heightAt(g, [0, -1501]), null);
+});
+
+test('blendGrid: a fine grid takes the heights of a coarse one on its edges and keeps its own inside the margin', () => {
+  // A fine grid of 21 by 21 points 10 m apart over [-100, -100, 100, 100] with bumps, in a coarse ground of 500 m.
+  const fine: HeightGrid = { box: [-100, -100, 100, 100], cell: 10, cols: 21, rows: 21, values: Array.from({ length: 441 }, (_, k) => 500 + ((k * 7) % 13)) };
+  const coarse: HeightGrid = { box: [-1000, -1000, 1000, 1000], cell: 500, cols: 5, rows: 5, values: Array.from({ length: 25 }, () => 500) };
+  const b = blendGrid(fine, coarse, { margin: 50 });
+  assert.deepEqual([b.box, b.cell, b.cols, b.rows], [fine.box, 10, 21, 21]);
+  for (let i = 0; i < 21; i++) {
+    for (const k of [i, 20 * 21 + i, i * 21, i * 21 + 20]) assert.equal(b.values[k], 500);
+  }
+  // Five cells in, at the margin and past it, the fine grid is its own.
+  for (let r = 5; r <= 15; r++) for (let c = 5; c <= 15; c++) assert.equal(b.values[r * 21 + c], fine.values[r * 21 + c]);
+  // Between, its bumps grow from nothing at the edge to the whole of them at the margin.
+  const bump = (g: HeightGrid, c: number): number => Math.abs(g.values[10 * 21 + c]! - 500);
+  assert.ok(bump(b, 1) <= bump(fine, 1) && bump(b, 4) <= bump(fine, 4));
+  // Where the coarse grid has no height the fine one keeps its own; a margin of 0 is refused.
+  const far: HeightGrid = { ...coarse, box: [5000, 5000, 7000, 7000] };
+  assert.deepEqual(blendGrid(fine, far, { margin: 50 }).values, fine.values);
+  assert.throws(() => blendGrid(fine, coarse, { margin: 0 }), /margin/);
 });

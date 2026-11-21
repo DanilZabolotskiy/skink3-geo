@@ -10,6 +10,7 @@
 //   const far = fitView(town.frames.city.views.wide!, { w: 1920, h: 1080 });
 //   const ground = town.city.terrain!.bands.map((b) => ({ band: b.band, pieces: ringsInTiles(far, [b.ring]) }));
 //   const lit = gridOnStage(view, town.city.relief!.grid!);                        // a grid of heights for relief shading
+//   const h = heightAt(town.city.relief!.grid!, [500, -200]);                     // metres, for placing things
 //   const shore = shoresOnStage(view, town.city.water!.map((f) => f.ring));        // the shores, without the cut
 //
 // This file draws nothing and names no colour: what a layer looks like is the scene's.
@@ -458,6 +459,55 @@ export function gridOnStage(view: View, grid: HeightGrid, o: { margin?: number }
     heights: { cols: c1 - c0 + 1, rows: r1 - r0 + 1, values },
     vertical: view.scale,
   };
+}
+
+/**
+ * The height of the ground at a place (metres, x east and y north, as the layers hold places), read off a grid of
+ * heights between its four nearest points; null outside the grid. It places things by the ground (woods over a
+ * height, a road over a pass) where a scene needs a number; the ground itself is drawn by a renderer from
+ * `gridOnStage`.
+ */
+export function heightAt(grid: HeightGrid, p: readonly number[]): number | null {
+  const { box, cell, cols, rows, values } = grid;
+  const u = (p[0]! - box[0]) / cell;
+  const v = (box[3] - p[1]!) / cell;
+  if (!(u >= 0 && v >= 0 && u <= cols - 1 && v <= rows - 1)) return null;
+  const c0 = Math.min(cols - 2, Math.floor(u));
+  const r0 = Math.min(rows - 2, Math.floor(v));
+  const [fu, fv] = [u - c0, v - r0];
+  const at = (c: number, r: number): number => values[r * cols + c]!;
+  const top = at(c0, r0) * (1 - fu) + at(c0 + 1, r0) * fu;
+  const bottom = at(c0, r0 + 1) * (1 - fu) + at(c0 + 1, r0 + 1) * fu;
+  return top * (1 - fv) + bottom * fv;
+}
+
+/**
+ * A fine grid of heights eased into a coarse one at its edges: within `margin` metres of the edge of its box each
+ * height of `fine` turns, along a smooth curve, toward the height of `coarse` at that place, and on the edge itself
+ * it is that height. Two reliefs drawn from them, the fine one over the coarse one, meet without a seam: their
+ * ground is one at the edge, and the fine one adds its detail inside. Where `coarse` has no height, `fine` keeps its
+ * own. The grid it gives has the box, cell and points of `fine`.
+ */
+export function blendGrid(fine: HeightGrid, coarse: HeightGrid, o: { margin: number }): HeightGrid {
+  const margin = o.margin;
+  if (!(Number.isFinite(margin) && margin > 0)) throw new Error('blendGrid: "margin" is the metres over which the fine grid turns into the coarse one, above 0');
+  const { box, cell, cols, rows } = fine;
+  const values = fine.values.slice();
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const x = box[0] + c * cell;
+      const y = box[3] - r * cell;
+      const edge = Math.min(x - box[0], box[2] - x, y - box[1], box[3] - y);
+      if (edge >= margin) continue;
+      const under = heightAt(coarse, [x, y]);
+      if (under === null) continue;
+      const t = Math.max(0, edge) / margin;
+      const keep = t * t * (3 - 2 * t);
+      const k = r * cols + c;
+      values[k] = Math.round((under + (values[k]! - under) * keep) * 10) / 10 + 0;
+    }
+  }
+  return { ...fine, values };
 }
 
 /**

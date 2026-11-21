@@ -102,7 +102,7 @@ A frame gives its `centre` (`[lon, lat]`), its `box` in metres (`[x0, y0, x1, y1
 
 The heights are those of today. The coast is today's too, unless the spec takes it from a map of another age; then the land and the heights are of two dates, and the city's `SOURCES.md` says so.
 
-**The grid of heights.** A relief or a terrain whose spec asks for it (`grid`) also holds the ground it was traced from, smoothed as its lines are, as a grid of heights for a renderer that lights the ground itself (relief shading), which reads as one rolling surface where bands read as steps. `cols` by `rows` points lie `cell` metres apart, from the north-west corner of `box` to its south-east corner, so the points lie on its edges; `values` holds their heights in metres, to a tenth, row by row from the north, each row from the west, as an image holds its pixels. A terrain's grid is held to the first of its `levels` along the sea, as its bands are. It is large (a value a point): a scene takes the part its view shows with `gridOnStage`, and a spec that covers a wide box asks for a coarser `cell`.
+**The grid of heights.** A relief or a terrain whose spec asks for it (`grid`) also holds the ground it was traced from, smoothed as its lines are or as the spec says (`grid: { smooth }`), as a grid of heights for a renderer that lights the ground itself (relief shading), which reads as one rolling surface where bands read as steps. `cols` by `rows` points lie `cell` metres apart, from the north-west corner of `box` to its south-east corner, so the points lie on its edges; `values` holds their heights in metres, to a tenth, row by row from the north, each row from the west, as an image holds its pixels. A terrain's grid is held to the first of its `levels` along the sea, as its bands are. It is large (a value a point): a scene takes the part its view shows with `gridOnStage`, and a spec that covers a wide box asks for a coarser `cell`.
 
 **The morph.** Every epoch of a city has a second outline, `morph`, of the same number of points (160) set at equal steps along it, counter-clockwise and turned so that point *k* of one epoch lies nearest to point *k* of the next. A scene that draws the two as one region with the same point count grows the city from one epoch into the next with no further work. An outline with far more detail than 160 points can hold (a city of today, with its inlets and arms) is calmed first, so its `morph` follows its body and its `ring` keeps the detail.
 
@@ -113,7 +113,7 @@ Heights come from a surface model, so they include buildings and trees, and are 
 `map.ts` reads the layers and fits them into a stage. It draws nothing and names no colour.
 
 ```ts
-import { fitView, gridOnStage, linesOnStage, loadLayers, morphOnStage, ringsInTiles, ringsOnStage, shoresOnStage } from 'skink3-geo';
+import { blendGrid, fitView, gridOnStage, heightAt, linesOnStage, loadLayers, morphOnStage, ringsInTiles, ringsOnStage, shoresOnStage } from 'skink3-geo';
 
 const town = loadLayers(new URL('./valletta/layers.json', import.meta.url));
 const view = fitView(town.frames.city.views.metro!, { w: 1920, h: 1080 });       // the stage's [0, 0] is its middle
@@ -126,6 +126,8 @@ const ground = town.city.terrain!.bands.map((b) => ({ band: b.band, pieces: ring
 
 const lit = gridOnStage(view, town.city.relief!.grid!);                          // { at, w, h, heights, vertical }
 const banks = shoresOnStage(view, town.city.water!.map((f) => f.ring));          // the shores, open, without the cut
+const h = heightAt(town.city.relief!.grid!, [500, -200]);                        // metres, for placing things
+const core = blendGrid(town.city.relief!.grid!, town.city.terrain!.grid!, { margin: 400 });  // no seam in the terrain
 ```
 
 - `fitView(box, { w, h, at? }, { mode?, zoom?, shift? })` shows a box of the plane on the stage: `cover` (the default) fills the stage, `contain` shows the whole box; `zoom` and `shift` (metres) frame a part of it. The view turns y down.
@@ -133,6 +135,8 @@ const banks = shoresOnStage(view, town.city.water!.map((f) => f.ring));         
 - `ringsInTiles` is for forms too rich for one outline of 200 points, the land and the bands of a terrain: it cuts the stage into tiles and each ring into the pieces that lie in each, so that every piece keeps to the limit and the form keeps its detail. The pieces of a ring come together and overlap by a hair, for fills of one colour: a stroke along them would show the tiles.
 - `shoresOnStage` gives the outlines `ringsOnStage` gives for the same rings and options as open lines, without their stretches along the edge they were cut at: a shore line drawn along them never runs along the edge of the map. A ring the cut does not touch comes as one closed line.
 - `gridOnStage(view, grid, { margin? })` takes the part of a grid of heights that the view shows (with its margin, 120 units), as the rect it covers on the stage (`at` its middle, `w` by `h`, the first point at the top left), its heights row by row from the top, and `vertical`, the stage units to a metre of height that draw its slopes true. It is what a relief node of skink3-engine takes: `relief({ id, ...lit, vertical: lit.vertical * 3, dark, bright, tints })`.
+- `heightAt(grid, [x, y])` reads the height of the ground at a place of the frame (metres) off a grid of heights, between its four nearest points; null outside the grid.
+- `blendGrid(fine, coarse, { margin })` eases a fine grid into a coarse one: within `margin` metres of its edge its heights turn along a smooth curve to those of the coarse grid, which they are on the edge itself. A relief of a city's core drawn from it over a relief of its country meets it without a seam.
 - `toFrame(frame)` projects a `[lon, lat]` the layers do not hold.
 - `faultsOf(layers)` lists what is wrong with a city's layers (an outline that runs clockwise, crosses itself or leaves its frame; epochs out of step; the bands of a terrain out of their order): a project's test holds each of its cities to an empty list.
 
@@ -147,7 +151,7 @@ The layers hold no colour, no label text and nothing of a frame's design. A name
 | `city`, `name`, `centre`, `views` | the id (the file's name), the name, the centre of the city frame `[lon, lat]`, and the named boxes `[west, south, east, north]` |
 | `region` | `bbox`, `centre`, `country` (ISO A3), `rivers.names` or `rivers.rank`, `lakes.rank`: the country context, from Natural Earth |
 | `water` | `view`, `from` (any of `ohm`, `osm`, `copernicus`), `mask` (the classes of the Copernicus water mask: `ocean`, `lake`, `river`), `cell` (metres), `rivers` (names, or `{ id, name, match }` with a regular expression) |
-| `relief` | `view`, `cell`, `smooth` (metres), `contours` (the heights wanted, as a list, or `{ step }` for a line every so many metres), `hills`, `within`, and `grid`: `true` for the ground as a grid of heights at the relief's `cell`, `{ cell }` at a cell of its own |
+| `relief` | `view`, `cell`, `smooth` (metres), `contours` (the heights wanted, as a list, or `{ step }` for a line every so many metres), `hills`, `within`, and `grid`: `true` for the ground as a grid of heights at the relief's `cell`, smoothed as the lines are; `{ cell, smooth }` at a cell and a smoothing (metres) of its own, either left out for the relief's |
 | `relief.hills[]` | `{ id, name, summit \| spine, floor, reach }`: a hill is the ground that falls away from its `summit` `[lon, lat]`, down to `floor` metres and out to `reach` metres; neighbours part along the hollow between them. A ridge with no one top is given by a `spine`, a line along its crest |
 | `relief.within` | `{ wall, margin }`: no hill reaches more than `margin` metres outside that wall. For hills that are spurs of higher ground and have no foot on one side |
 | `terrain` | `view` (a wide one), and, each with a default by the scale: `cell` (metres; about 800 cells from the south of the view to its north, in whole tens, 30 at the least), `smooth` (metres, two cells), `levels` (the heights the bands part at; of 25, 50, 100, 200, 400, 800, 1600, 3200 and 6400 m, those the ground reaches), `detail`, `minArea`, `grid` (as the relief's, at the terrain's `cell`), and `source`, a sentence for `SOURCES.md` on what the layer rests on |
@@ -184,7 +188,7 @@ Only open data is read. The table of sources is `lib/sources.mjs`; a source come
 
 ## The tests
 
-`test/geom.test.ts` holds the plane geometry and the projection; `test/pipeline.test.mjs` the readers (TIFF, BigTIFF, LZW, ZIP), the grids and contours, the hills, the tiles read by the scale, the terrain of an island made in the test, the grids of heights of a relief and a terrain, the built-up outline, walls, epochs, the spec of a new city and the options of a project of its own, all on inputs made in the test; `test/example.test.ts` holds the committed example to the format and to what `map.ts` makes of it on a stage, its terrain in tiles included; `test/stage.test.ts` the shores of water cut by a view, a grid of heights fitted to a stage, and the faults of a grid. They download nothing.
+`test/geom.test.ts` holds the plane geometry and the projection; `test/pipeline.test.mjs` the readers (TIFF, BigTIFF, LZW, ZIP), the grids and contours, the hills, the tiles read by the scale, the terrain of an island made in the test, the grids of heights of a relief and a terrain, the built-up outline, walls, epochs, the spec of a new city and the options of a project of its own, all on inputs made in the test; `test/example.test.ts` holds the committed example to the format and to what `map.ts` makes of it on a stage, its terrain in tiles included; `test/stage.test.ts` the shores of water cut by a view, a grid of heights fitted to a stage, the height at a place, a fine grid eased into a coarse one, and the faults of a grid. They download nothing.
 
 ## Rules
 
