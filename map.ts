@@ -13,11 +13,14 @@
 //   const h = heightAt(town.city.relief!.grid!, [500, -200]);                     // metres, for placing things
 //   const shore = shoresOnStage(view, town.city.water!.map((f) => f.ring));        // the shores, without the cut
 //
+// A round body for a globe (globe.mjs) is read the same way: `loadGlobe`, in degrees, for a renderer's own sphere.
+//
 // This file draws nothing and names no colour: what a layer looks like is the scene's.
 
 import { readFileSync } from 'node:fs';
 import { area, clipLine, clipRing, crosses, dedupe, signedArea, simplify, type Box, type Point } from './lib/geom.mjs';
 import { projection, type LonLat } from './lib/project.mjs';
+import { sphericalArea, wholeRing } from './lib/globe.mjs';
 
 export type { Box, LonLat, Point };
 export type Ring = Point[];
@@ -223,6 +226,78 @@ export function faultsOf(l: Layers): string[] {
       if (t.levels[b.pit ? b.band : b.band - 1] !== b.height) out.push(`city.terrain.bands.${b.id}: its band is not that of its height`);
       if (k > 0 && area(b.ring) > area(t.bands[k - 1]!.ring)) out.push(`city.terrain.bands.${b.id}: larger than the band painted before it`);
     }
+  }
+  return out;
+}
+
+/** A polygon of a globe's layer: an outer ring, then its holes, in degrees [lon, lat]. */
+export interface GlobePolygon {
+  id: string;
+  areaKm2: number;
+  name?: string;
+  rings: LonLat[][];
+}
+
+/**
+ * globe.json as it is written by globe.mjs: a round body for a globe, in degrees [lon, lat]. Seen from outside, an
+ * outer ring runs counter-clockwise round what it holds and a hole clockwise; no ring has a point on a pole or a cut
+ * of a flat map. A scene's renderer places the points on its own sphere.
+ *
+ *   const earth = loadGlobe(new URL('./earth/globe.json', import.meta.url));
+ *   const land = earth.layers.land!.flatMap((p) => p.rings);                    // every ring of the land, holes too
+ *   const lights = earth.places!.slice(0, 800).map((p) => [...p.at, p.pop]);    // the largest towns, by their people
+ *   const maria = loadGlobe(moonFile).layers.maria!.flatMap((p) => p.rings);    // the Moon's dark seas
+ */
+export interface GlobeLayers {
+  format: 'globe-geo/1';
+  /** `earth` or `moon`. */
+  body: string;
+  name: string;
+  /** The body's mean radius, in kilometres: the areas are of a sphere of it. */
+  radiusKm: number;
+  /** What it was built with: the thinning in degrees of arc, the least areas in km², and for the Earth the scale of Natural Earth and the least population kept. */
+  made: { tolerance: number; minArea: number; digits: number; scale?: number; lakeArea?: number; iceArea?: number; minPop?: number };
+  /**
+   * The layers, in the order they are painted, each the largest polygon first. The Earth's: `land`, `lakes` (over the
+   * land) and `ice` (over the land and the sea). The Moon's: `maria`, its dark seas of basalt over the highlands.
+   */
+  layers: Record<string, GlobePolygon[]>;
+  /** The Earth's towns by their greatest population, the largest first. */
+  places?: { name: string; at: LonLat; pop: number }[];
+}
+
+/** A globe's layers, read from globe.json: a path, or a URL made from `import.meta.url`. */
+export function loadGlobe(file: string | URL): GlobeLayers {
+  const globe = JSON.parse(readFileSync(file, 'utf8')) as GlobeLayers;
+  if (globe.format !== 'globe-geo/1') throw new Error(`loadGlobe: ${String(file)} is of format ${String(globe.format)}, not globe-geo/1`);
+  return globe;
+}
+
+/**
+ * What is wrong with a globe's layers, one line a fault; none when they keep to the format: every point is a finite
+ * [lon, lat] off the poles, every ring has three points or more and is whole on the sphere, outer rings run
+ * counter-clockwise seen from outside and holes clockwise, the polygons come largest first, and the towns largest first.
+ */
+export function globeFaults(g: GlobeLayers): string[] {
+  const out: string[] = [];
+  if (!(g.radiusKm > 0)) out.push('radiusKm: not a radius');
+  for (const [name, list] of Object.entries(g.layers ?? {})) {
+    for (const [k, p] of list.entries()) {
+      if (k > 0 && p.areaKm2 > list[k - 1]!.areaKm2) out.push(`${name}.${p.id}: larger than the polygon before it`);
+      if (p.rings.length === 0) out.push(`${name}.${p.id}: no rings`);
+      for (const [j, r] of p.rings.entries()) {
+        const at = `${name}.${p.id}.${j}`;
+        if (r.length < 3) out.push(`${at}: ${r.length} points`);
+        else if (r.some(([lon, lat]) => !Number.isFinite(lon) || !Number.isFinite(lat) || lon < -180 || lon > 180 || Math.abs(lat) >= 89.99)) out.push(`${at}: a point that is not a place off the poles`);
+        else if (wholeRing(r)?.length !== r.length) out.push(`${at}: not whole on the sphere (a repeated place, or a line that turns straight back)`);
+        else if (sphericalArea(r) > 0 !== (j === 0)) out.push(`${at}: ${j === 0 ? 'an outer ring that runs clockwise' : 'a hole that runs counter-clockwise'}`);
+      }
+    }
+  }
+  for (const [k, p] of (g.places ?? []).entries()) {
+    if (!Number.isFinite(p.at[0]) || !Number.isFinite(p.at[1]) || Math.abs(p.at[0]) > 180 || Math.abs(p.at[1]) > 90) out.push(`places.${k}: not a place`);
+    if (!(p.pop >= 0)) out.push(`places.${k}: no population`);
+    if (k > 0 && p.pop > g.places![k - 1]!.pop) out.push(`places.${k}: larger than the town before it`);
   }
   return out;
 }

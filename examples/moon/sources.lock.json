@@ -1,0 +1,15 @@
+{
+  "format": "globe-geo-lock/1",
+  "downloads": [
+    {
+      "id": "lroc-global-mare-180",
+      "source": "lroc",
+      "licence": "public domain",
+      "request": "LROC RDR LROLRC_2001 EXTRAS/SHAPEFILE/LROC_GLOBAL_MARE/LROC_GLOBAL_MARE_180.ZIP",
+      "bytes": 8750199,
+      "sha256": "a85073f6fe05a0b9b38db6cb1d2f667e51c134517debcd1f3b40fda9a58cde88",
+      "retrieved": "2026-11-21",
+      "dataDate": "2014"
+    }
+  ]
+}

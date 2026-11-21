@@ -1,0 +1,55 @@
+{
+  "format": "globe-geo-lock/1",
+  "downloads": [
+    {
+      "id": "ne_110m_land",
+      "source": "natural-earth",
+      "licence": "public domain",
+      "request": "natural-earth 5.1.2 ne_110m_land.geojson",
+      "bytes": 138160,
+      "sha256": "9e0729ee253ca7d7a5c4ae9395fb1902264c5377c52e224d13dd85010e2835d9",
+      "retrieved": "2026-11-21",
+      "dataDate": "5.1.2"
+    },
+    {
+      "id": "ne_110m_lakes",
+      "source": "natural-earth",
+      "licence": "public domain",
+      "request": "natural-earth 5.1.2 ne_110m_lakes.geojson",
+      "bytes": 36648,
+      "sha256": "eb02ecc86c82004fccbf979058bfabbbd6c2d07968c7844d38eb1c9152d2ffc9",
+      "retrieved": "2026-11-21",
+      "dataDate": "5.1.2"
+    },
+    {
+      "id": "ne_110m_glaciated_areas",
+      "source": "natural-earth",
+      "licence": "public domain",
+      "request": "natural-earth 5.1.2 ne_110m_glaciated_areas.geojson",
+      "bytes": 21720,
+      "sha256": "e61e3f45e22f087f861ac2fda6258fc15c849a216d74c27ccf0164eeafbd950a",
+      "retrieved": "2026-11-21",
+      "dataDate": "5.1.2"
+    },
+    {
+      "id": "ne_50m_antarctic_ice_shelves_polys",
+      "source": "natural-earth",
+      "licence": "public domain",
+      "request": "natural-earth 5.1.2 ne_50m_antarctic_ice_shelves_polys.geojson",
+      "bytes": 131055,
+      "sha256": "fedf866d20e20e37d037fa19968b6d3022fbe5323fd8728527b0f0ddb547e790",
+      "retrieved": "2026-11-21",
+      "dataDate": "5.1.2"
+    },
+    {
+      "id": "ne_10m_populated_places_simple",
+      "source": "natural-earth",
+      "licence": "public domain",
+      "request": "natural-earth 5.1.2 ne_10m_populated_places_simple.geojson",
+      "bytes": 4932147,
+      "sha256": "fd3fa867a320cbd5c5b6bb5bc550afeec2939fb2cef688e508007282a55ac42f",
+      "retrieved": "2026-11-21",
+      "dataDate": "5.1.2"
+    }
+  ]
+}

@@ -1,11 +1,12 @@
 # skink3-geo
 
-Real geographic data turned into the simplified vector layers a city's map is drawn from: the country round it, the terrain of its surroundings in bands of height, the sea and the rivers in their true width, the relief, walls, main streets, the built-up land, and the city's outline through time, ready to grow from one epoch into the next. One spec a city, one command, and the same bytes every time, with the credit of every source written out.
+Real geographic data turned into the simplified vector layers a city's map is drawn from: the country round it, the terrain of its surroundings in bands of height, the sea and the rivers in their true width, the relief, walls, main streets, the built-up land, and the city's outline through time, ready to grow from one epoch into the next; and a round body for a globe, the Earth or the Moon, in degrees. One spec a city, one command, and the same bytes every time, with the credit of every source written out.
 
-It is made for animated maps (the scenes of [skink3-engine](https://github.com/DanilZabolotskiy/skink3-engine) among them), but it draws nothing and depends on no renderer: its output is one JSON file of points in metres.
+It is made for animated maps (the scenes of [skink3-engine](https://github.com/DanilZabolotskiy/skink3-engine) among them), but it draws nothing and depends on no renderer: its output is one JSON file of points in metres (in degrees, for a globe).
 
 ```
 build.mjs, lib/             the pipeline: plain Node, no package needed to build
+globe.mjs                   a round body for a globe, the Earth or the Moon, in degrees ("A globe")
 map.ts                      for a scene: the types of the layers, loading, the fit into a stage
 test/                       the tests
 examples/                   a root of cities, with one small city built: Valletta
@@ -13,6 +14,7 @@ examples/                   a root of cities, with one small city built: Vallett
   <city>/layers.json        the layers: the only file a scene reads
   <city>/SOURCES.md         where each layer comes from, what was drawn by hand, the credit lines
   <city>/sources.lock.json  every download: its request, its SHA-256, its size, its date
+  earth/, moon/             the Earth at 1:110m and the Moon, for a globe, each with its SOURCES.md and its lock
   cache/, out/              not in git: the raw downloads, and the previews
 ```
 
@@ -142,6 +144,43 @@ const core = blendGrid(town.city.relief!.grid!, town.city.terrain!.grid!, { marg
 
 The layers hold no colour, no label text and nothing of a frame's design. A name in them (`name`) is data.
 
+## A globe
+
+`globe.mjs` builds a round body for a globe: the polygons of its surface in degrees, from public-domain data. The Earth has its land, its large lakes, its ice and its towns, from Natural Earth; the Moon has its maria, the dark seas of basalt, from the mare boundaries of the Lunar Reconnaissance Orbiter Camera. A globe turns, so nothing is projected: a scene's renderer places each point on its own sphere.
+
+```
+node globe.mjs --body earth --root examples --scale 110 --preview   # builds examples/earth/; the preview goes to out/earth/globe.png
+node globe.mjs --body moon --root examples --preview                # builds examples/moon/
+node globe.mjs --body earth --offline                               # from the cache alone; --update takes a changed source
+```
+
+- `--tolerance` thins the outlines to that many degrees of arc (the Earth 0.08, the Moon 0.15) and `--min-area` leaves out polygons and holes smaller than that many km² (300 for both). For the Earth, `--scale` is that of Natural Earth, 50 (the default: coasts fine enough for a globe as large as the frame) or 110 (the committed example), and `--lake-area`, `--ice-area` and `--min-pop` leave out the smaller lakes, ice and towns (4000 km², 300 km² and 200 000 people). `globe.json` records them in `made`.
+- **Made whole on the sphere.** A flat map cuts a body where the sphere has no edge: Natural Earth closes Antarctica along the south pole and down the 180th meridian, and parts a few islands at that meridian. The build takes the pole and the slit out, so that Antarctica is one ring round the pole, and keeps the parted pieces, whose shared edge lies on one meridian, for a renderer that fills a layer at once.
+- **Thinned on the sphere.** Each ring is thinned on the plane of an azimuthal projection round its own middle, where a degree of arc is a degree in every direction, so a coast by a pole is not left far denser than one by the equator; the points kept are the ring's own. Where thinning would make a ring cross itself the tolerance is halved, twice at the most; a ring that still crosses itself then (a narrow neck of land or sea) is thinned at the tolerance all the same, its crossings no wider than the tolerance.
+- **Neighbours are thinned apart.** Maria that meet along a line are separate polygons, each thinned alone, so a hairline can open between them: a renderer fills a layer with a hairline stroke of its own colour, as skink3-engine's globe does.
+
+`globe.json`, format `globe-geo/1`, holds `body`, `radiusKm` (the body's mean radius: the areas are of a sphere of it) and `made`, then `layers` in the order they are painted, an entry a line, and the Earth's `places`. Seen from outside, an outer ring runs counter-clockwise round what it holds and a hole clockwise: on a map with north up, it lies to the left of the line.
+
+| Layer | What |
+|---|---|
+| `layers.land[]` | the Earth's land: `{ id, areaKm2, rings }`, an outer ring, then its holes, the largest polygon first |
+| `layers.lakes[]` | `{ id, areaKm2, name, rings }`: its large lakes, painted over the land |
+| `layers.ice[]` | `{ id, areaKm2, rings }`: ice sheets and caps (glaciated areas) and the Antarctic ice shelves, painted over the land and the sea |
+| `layers.maria[]` | the Moon's maria: `{ id, areaKm2, name, rings }`, painted over its highlands, which are the rest of the sphere |
+| `places[]` | `{ name, at, pop }`: the Earth's towns by their greatest population, the largest first: for the lights of a night side |
+
+```ts
+import { globeFaults, loadGlobe } from 'skink3-geo';
+
+const earth = loadGlobe(new URL('./earth/globe.json', import.meta.url));
+const land = earth.layers.land!.flatMap((p) => p.rings);                    // fill them at once, even-odd: the holes stay open
+const lights = earth.places!.slice(0, 800).map((p) => [...p.at, p.pop]);    // the largest towns, by their people
+const maria = loadGlobe(new URL('./moon/globe.json', import.meta.url)).layers.maria!.flatMap((p) => p.rings);
+globeFaults(earth);                                                         // [] when it keeps to the format
+```
+
+A project builds its own globes with `runGlobe(argv, { root, command })` from `skink3-geo/globe.mjs`, as it builds its cities with `run`. `lib/shapefile.mjs` reads the polygons and fields of an ESRI shapefile, which is how the mare boundaries come.
+
 ## The spec
 
 `examples/cities/valletta.json` is what the command for a new city writes. A spec may ask for more:
@@ -173,6 +212,8 @@ Only open data is read. The table of sources is `lib/sources.mjs`; a source come
 | Source | For | Licence | In a film's description |
 |---|---|---|---|
 | Natural Earth 5.1.2, 1:10m | the region | public domain | not required |
+| Natural Earth 5.1.2, 1:50m and 1:110m land, lakes, glaciated areas, Antarctic ice shelves, and 1:10m populated places | the Earth for a globe (`globe.mjs`) | public domain | not required |
+| LROC Global Mare Boundaries (Nelson et al. 2014), in NASA's Planetary Data System | the Moon's maria for a globe | public domain | not required, the line in `SOURCES.md` |
 | Copernicus DEM GLO-30 and its water body mask | relief and terrain; sea, lakes and wide rivers | free with attribution | **required**, the line in `SOURCES.md` |
 | Global Human Settlement Layer, GHS-BUILT-S R2023A (European Commission, JRC) | the built-up city of 1975 to today | free and open, reuse with acknowledgment of the source | **required**, the line in `SOURCES.md` |
 | OpenHistoricalMap | walls, rivers, streets with their years, landmarks | CC0 | not required |
@@ -188,7 +229,7 @@ Only open data is read. The table of sources is `lib/sources.mjs`; a source come
 
 ## The tests
 
-`test/geom.test.ts` holds the plane geometry and the projection; `test/pipeline.test.mjs` the readers (TIFF, BigTIFF, LZW, ZIP), the grids and contours, the hills, the tiles read by the scale, the terrain of an island made in the test, the grids of heights of a relief and a terrain, the built-up outline, walls, epochs, the spec of a new city and the options of a project of its own, all on inputs made in the test; `test/example.test.ts` holds the committed example to the format and to what `map.ts` makes of it on a stage, its terrain in tiles included; `test/stage.test.ts` the shores of water cut by a view, a grid of heights fitted to a stage, the height at a place, a fine grid eased into a coarse one, and the faults of a grid. They download nothing.
+`test/geom.test.ts` holds the plane geometry and the projection; `test/pipeline.test.mjs` the readers (TIFF, BigTIFF, LZW, ZIP), the grids and contours, the hills, the tiles read by the scale, the terrain of an island made in the test, the grids of heights of a relief and a terrain, the built-up outline, walls, epochs, the spec of a new city and the options of a project of its own, all on inputs made in the test; `test/example.test.ts` holds the committed example to the format and to what `map.ts` makes of it on a stage, its terrain in tiles included; `test/stage.test.ts` the shores of water cut by a view, a grid of heights fitted to a stage, the height at a place, a fine grid eased into a coarse one, and the faults of a grid; `test/globe.test.ts` the committed Earth and Moon to their format, rings measured, oriented, made whole and thinned on the sphere, a shapefile made in the test, and globes built from collections made in the test. They download nothing.
 
 ## Rules
 
@@ -219,7 +260,8 @@ The code of this repository is under the MIT License: see [`LICENSE`](LICENSE). 
 | [OpenStreetMap](https://www.openstreetmap.org/copyright) | ODbL 1.0; layers made from it are a derived database, shared alike | **required:** "© OpenStreetMap contributors" |
 | [Ancient World Mapping Center geodata](https://github.com/AWMC/geodata#license) | ODbL 1.0: "The GeoJson files are offered under the ODC Open Database License". It is derived from the Barrington Atlas of the Greek and Roman World and holds the Center's modifications to OpenStreetMap; layers made from it are a derived database, shared alike | **required:** the Center and the licence named, and "© OpenStreetMap contributors" |
 | [OpenHistoricalMap](https://www.openhistoricalmap.org/copyright) | CC0 1.0 | none |
+| [LROC Global Mare Boundaries](https://lroc.im-ldi.com/about/terms), from the [PDS archive](https://pds.lroc.im-ldi.com/data/LRO-L-LROC-5-RDR-V1.0/LROLRC_2001/EXTRAS/SHAPEFILE/LROC_GLOBAL_MARE/) | public domain: "Data products available through the LROC Data Node of the PDS or through NASA PDS interfaces are in the public domain." | none required; its readme asks the product be cited: Nelson, D. M., et al. (2014), "Mapping lunar maria extents and lobate scarps using LROC image products", Lunar and Planetary Science Conference 45, 2861. LROC asks its images be credited "NASA/GSFC/Arizona State University" |
 | [SRTM](https://www.earthdata.nasa.gov/data/instruments/srtm) | public domain | none |
 
-The example in this repository is made from the first three alone.
+The example city in this repository is made from the first three alone; the example globes from Natural Earth and the LROC mare boundaries.
 
