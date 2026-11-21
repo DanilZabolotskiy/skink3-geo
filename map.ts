@@ -9,6 +9,8 @@
 //   const grow = morphOnStage(view, town.city.epochs![0]!, town.city.epochs![1]!);  // grow.at(t), t from 0 to 1
 //   const far = fitView(town.frames.city.views.wide!, { w: 1920, h: 1080 });
 //   const ground = town.city.terrain!.bands.map((b) => ({ band: b.band, pieces: ringsInTiles(far, [b.ring]) }));
+//   const lit = gridOnStage(view, town.city.relief!.grid!);                        // a grid of heights for relief shading
+//   const shore = shoresOnStage(view, town.city.water!.map((f) => f.ring));        // the shores, without the cut
 //
 // This file draws nothing and names no colour: what a layer looks like is the scene's.
 
@@ -73,6 +75,19 @@ export interface Epoch {
   morph: Ring;
 }
 
+/**
+ * The ground as a grid of heights, for relief shading: `cols` by `rows` points `cell` metres apart, from the north-west
+ * corner of `box` to its south-east corner, so the points lie on its edges. `values` holds their heights in metres, to
+ * a tenth, row by row from the north, each row from the west, as an image holds its pixels.
+ */
+export interface HeightGrid {
+  box: Box;
+  cell: number;
+  cols: number;
+  rows: number;
+  values: number[];
+}
+
 /** The terrain of a wide view, for a map with depth: the land, and its ground in bands of height. */
 export interface Terrain {
   /** The view it covers, where the spec names one. */
@@ -95,6 +110,8 @@ export interface Terrain {
   lakes: { id: string; areaHa: number; ring: Ring }[];
   /** Rivers as lines, each cut where it meets the sea. */
   rivers: { id: string; name: string; lengthKm: number; lines: Line[] }[];
+  /** The ground the bands are traced on, as a grid of heights over `box`, where the spec asks for it (`grid`). */
+  grid?: HeightGrid;
 }
 
 export interface CityFrameLayers {
@@ -107,6 +124,8 @@ export interface CityFrameLayers {
   relief?: {
     contours: { id: string; height: number; rings: Ring[]; lines: Line[] }[];
     hills: Hill[];
+    /** The ground the contours are traced on, as a grid of heights over the relief's box, where the spec asks for it (`grid`). */
+    grid?: HeightGrid;
   };
   walls?: { id: string; name: string; built?: number; lengthKm: number; areaHa: number; ring: Ring }[];
   /** Main streets, the widest class first. `from` and `to` are the years a street stood, where its source dates it. */
@@ -145,7 +164,8 @@ export function loadLayers(file: string | URL): Layers {
  * What is wrong with the layers of a city, one line a fault; none when they keep to the format:
  * every outline runs counter-clockwise, does not cross itself and lies in its frame; the epochs
  * come in the order of their years with morph rings of one size; every hill has its rings; the bands
- * of a terrain come in the order to paint them, each with the band of its height.
+ * of a terrain come in the order to paint them, each with the band of its height; a grid of heights
+ * holds a finite height for each of its points, which lie on the edges of its box.
  */
 export function faultsOf(l: Layers): string[] {
   const out: string[] = [];
@@ -166,6 +186,16 @@ export function faultsOf(l: Layers): string[] {
   for (const [name, view] of Object.entries(l.frames.city.views)) if (!(view[0] < view[2] && view[1] < view[3])) out.push(`frames.city.views.${name}: an empty box`);
   for (const f of l.city.water ?? []) ring(`city.water.${f.id}`, f.ring, city);
   for (const f of l.city.islands ?? []) ring(`city.islands.${f.id}`, f.ring, city);
+  const grid = (name: string, g: HeightGrid | undefined): void => {
+    if (!g) return;
+    const [x0, y0, x1, y1] = g.box;
+    if (!(Number.isInteger(g.cols) && Number.isInteger(g.rows) && g.cols >= 2 && g.rows >= 2 && g.cell > 0)) out.push(`${name}: cols, rows or cell out of range`);
+    else if (g.values.length !== g.cols * g.rows) out.push(`${name}: ${g.values.length} heights for ${g.cols} by ${g.rows} points`);
+    else if (g.values.some((v) => !Number.isFinite(v))) out.push(`${name}: a height that is not a number`);
+    else if (Math.abs(x1 - x0 - (g.cols - 1) * g.cell) > 0.2 || Math.abs(y1 - y0 - (g.rows - 1) * g.cell) > 0.2) out.push(`${name}: its points do not lie on the edges of its box`);
+  };
+  grid('city.relief.grid', l.city.relief?.grid);
+  grid('city.terrain.grid', l.city.terrain?.grid);
   for (const h of l.city.relief?.hills ?? []) {
     if (h.rings.length === 0 || !(h.height > 0)) out.push(`city.relief.hills.${h.id}: no rings or no height`);
     for (const [k, r] of h.rings.entries()) ring(`city.relief.hills.${h.id}.${k}`, r.ring, city);
@@ -345,6 +375,89 @@ export function linesOnStage(view: View, lines: readonly Line[], o: StageOptions
     }
   }
   return out;
+}
+
+export interface ShoreOptions extends StageOptions {
+  /** How near the edge of the cut a point of an outline lies to count as on it, in stage units (0.5). */
+  tolerance?: number;
+}
+
+/**
+ * The shores of rings on the stage: the outlines `ringsOnStage` gives for the same rings and options, each as open
+ * lines that leave out its stretches along the edge it was cut at, so that a line drawn along the shore never runs
+ * along the cut. A line keeps the point where it meets the cut at each end; a ring that the cut does not touch comes
+ * as one line, closed by its first point repeated. Each is the `points` of an open `stroke`.
+ */
+export function shoresOnStage(view: View, rings: readonly Ring[], o: ShoreOptions = {}): Point[][] {
+  const tol = o.tolerance ?? 0.5;
+  const box = grown(view, o.margin ?? 120);
+  const [x0, y0] = view.project([box[0], box[3]]);
+  const [x1, y1] = view.project([box[2], box[1]]);
+  // The edges of the cut a point lies on, one bit an edge: a stretch between two points on one edge runs along the cut.
+  const on = (p: Point): number => (Math.abs(p[0] - x0) <= tol ? 1 : 0) | (Math.abs(p[0] - x1) <= tol ? 2 : 0) | (Math.abs(p[1] - y0) <= tol ? 4 : 0) | (Math.abs(p[1] - y1) <= tol ? 8 : 0);
+  const out: Point[][] = [];
+  for (const pts of ringsOnStage(view, rings, o)) {
+    const n = pts.length;
+    const edges = pts.map(on);
+    const cut = pts.map((_, i) => (edges[i]! & edges[(i + 1) % n]!) !== 0);
+    if (!cut.includes(true)) {
+      out.push([...pts, pts[0]!]);
+      continue;
+    }
+    // From the end of a stretch along the cut round to it again: each run of stretches off the cut is a line.
+    const start = cut.findIndex((_, i) => cut[(i - 1 + n) % n]);
+    let line: Point[] = [pts[start]!];
+    for (let j = 0; j < n; j++) {
+      const i = (start + j) % n;
+      const next = pts[(i + 1) % n]!;
+      if (cut[i]) {
+        if (line.length > 1) out.push(line);
+        line = [next];
+      } else line.push(next);
+    }
+  }
+  return out;
+}
+
+/** A grid of heights on the stage, as the engine's `relief` takes it. */
+export interface GridOnStage {
+  /** The middle of the rect the grid covers on the stage, and its size: the first point at its top left, the last at its bottom right. */
+  at: Point;
+  w: number;
+  h: number;
+  /** The heights in metres, row by row from the top of the rect, each row from its left. */
+  heights: { cols: number; rows: number; values: number[] };
+  /** Stage units to a metre of height: the slopes drawn true. A scene multiplies it to steepen them. */
+  vertical: number;
+}
+
+/**
+ * The part of a grid of heights that a view shows, with its margin (120 units), on the stage: the rect it covers, its
+ * heights from the top row of the rect, and the `vertical` scale that draws its slopes true. It is what the engine's
+ * `relief` node takes: `relief({ id, ...gridOnStage(view, grid), dark, bright, tints })`.
+ */
+export function gridOnStage(view: View, grid: HeightGrid, o: { margin?: number } = {}): GridOnStage {
+  const box = grown(view, o.margin ?? 120);
+  const { cell, cols, rows } = grid;
+  const [gx0, , , gy1] = grid.box;
+  // The points the view holds, and one more on each side, so the rect covers it.
+  const c0 = Math.max(0, Math.floor((box[0] - gx0) / cell));
+  const c1 = Math.min(cols - 1, Math.ceil((box[2] - gx0) / cell));
+  const r0 = Math.max(0, Math.floor((gy1 - box[3]) / cell));
+  const r1 = Math.min(rows - 1, Math.ceil((gy1 - box[1]) / cell));
+  if (c1 - c0 < 1 || r1 - r0 < 1) throw new Error('gridOnStage: the grid lies outside the view');
+  const values: number[] = [];
+  for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) values.push(grid.values[r * cols + c]!);
+  const west = gx0 + c0 * cell;
+  const north = gy1 - r0 * cell;
+  const [w, h] = [(c1 - c0) * cell, (r1 - r0) * cell];
+  return {
+    at: view.project([west + w / 2, north - h / 2]),
+    w: tenth(w * view.scale),
+    h: tenth(h * view.scale),
+    heights: { cols: c1 - c0 + 1, rows: r1 - r0 + 1, values },
+    vertical: view.scale,
+  };
 }
 
 /**

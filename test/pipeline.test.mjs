@@ -282,6 +282,39 @@ test('relief: contours at the heights asked for, or at a step; a hill is a stack
   assert.deepEqual(stepped.contours.map((c) => c.height), [30, 60, 90]);
 });
 
+test('relief and terrain: a grid of heights on request, row by row from the north-west corner, its points on the edges of its box', () => {
+  const proj = projection({ lon: 10, lat: 45 });
+  const frame = { proj, reliefBox: [-1500, -1500, 1500, 1500] };
+  // The ground rises to the north, 0.01 m a metre, and to the east, 0.002 m a metre.
+  const heightAt = (lonlat) => {
+    const [x, y] = proj.forward(lonlat);
+    return 100 + 0.01 * y + 0.002 * x;
+  };
+  const g = buildRelief({ cell: 30, smooth: 30, contours: [], grid: true }, frame, heightAt).grid;
+  assert.deepEqual([g.cell, g.cols, g.rows, g.box], [30, 101, 101, [-1500, -1500, 1500, 1500]]);
+  assert.equal(g.values.length, g.cols * g.rows);
+  // The first row is the north, higher than the last; along a row the ground rises to the east.
+  assert.ok(g.values[0] > g.values[(g.rows - 1) * g.cols]);
+  assert.ok(g.values[g.cols - 1] > g.values[0]);
+  // The point in the middle, at the centre, away from the edges the smoothing reads past: the ground's own height.
+  assert.ok(Math.abs(g.values[50 * g.cols + 50] - 100) <= 0.1, String(g.values[50 * g.cols + 50]));
+  const coarse = buildRelief({ cell: 30, smooth: 30, contours: [], grid: { cell: 90 } }, frame, heightAt).grid;
+  assert.deepEqual([coarse.cols, coarse.rows, coarse.box], [34, 34, [-1500, -1470, 1470, 1500]]);
+  assert.equal(buildRelief({ cell: 30, smooth: 30, contours: [] }, frame, heightAt).grid, undefined);
+  assert.throws(() => buildRelief({ cell: 30, contours: [], grid: { step: 5 } }, frame, heightAt), /"grid" is true, or \{ cell \}/);
+  // A terrain's grid covers the box of its view, from the ground its bands are traced on.
+  const wide = { proj, box: [-3000, -3000, 3000, 3000] };
+  const hill = (lonlat) => {
+    const [x, y] = proj.forward(lonlat);
+    return Math.max(0, 400 - Math.hypot(x, y) / 5);
+  };
+  const t = buildTerrain({ cell: 100, levels: [100], grid: true }, wide, { heightAt: hill });
+  assert.deepEqual([t.grid.cols, t.grid.rows, t.grid.box], [61, 61, [-3000, -3000, 3000, 3000]]);
+  const top = t.grid.values.indexOf(Math.max(...t.grid.values));
+  assert.deepEqual([top % 61, Math.floor(top / 61)], [30, 30]);
+  assert.equal(buildTerrain({ cell: 100, levels: [100] }, wide, { heightAt: hill }).grid, undefined);
+});
+
 test('dem: a tile is read by the scale, in blocks that are the mean of their samples; a water mask becomes a share of water', () => {
   const second = 1 / 3600;
   const tile = { lon0: 10, lat0: 45, dx: second, dy: second, w: 6, h: 4, data: Float32Array.from({ length: 24 }, (_, k) => k) };

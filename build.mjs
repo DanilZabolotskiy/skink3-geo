@@ -378,6 +378,7 @@ export async function run(argv, { root = process.cwd(), command = 'build.mjs', s
     const relief = buildRelief(spec.relief, { ...frames.city, reliefBox }, sampler(tiles), limit);
     cityLayers.relief = relief;
     log(`  relief: contours ${relief.contours.map((c) => `${c.height} m (${c.rings.length + c.lines.length})`).join(', ')}; hills ${relief.hills.map((h) => `${h.id} ${h.height} m ${h.areaHa} ha`).join(', ')}`);
+    if (relief.grid) log(`  relief: a grid of heights, ${relief.grid.cols} by ${relief.grid.rows} points every ${relief.grid.cell} m`);
   }
 
   if (spec.terrain) {
@@ -447,6 +448,7 @@ export async function run(argv, { root = process.cwd(), command = 'build.mjs', s
     const { lost, ...layer } = terrain;
     void lost;
     cityLayers.terrain = { ...(t.view ? { view: t.view } : {}), ...layer };
+    if (layer.grid) log(`  terrain: a grid of heights, ${layer.grid.cols} by ${layer.grid.rows} points every ${layer.grid.cell} m`);
     const blocks = read.factor > 1 ? `read in blocks of ${read.factor} by ${read.factor} samples, ` : '';
     use('city.terrain', 'copernicus', `Copernicus DEM GLO-30 (a surface model: it includes buildings and trees), ${blocks}as the mean height of each cell of ${plan.cell} m, smoothed over ${plan.smooth} m: the ground in bands at ${terrain.levels.join(', ')} m${lakesWanted ? '; the lakes from its water body mask' : ''}${coast === 'copernicus' ? '; the coast from the same mask (the sea of 2011-2015)' : ''}`);
     if (coast === 'awmc') use('city.terrain', 'awmc', `the coast: the open water of the Ancient World Mapping Center, \`${t.coast.file}\` at commit ${AWMC_COMMIT.slice(0, 12)}`);
