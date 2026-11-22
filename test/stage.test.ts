@@ -3,7 +3,8 @@
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { blendGrid, faultsOf, fitView, gridOnStage, heightAt, loadLayers, ringsOnStage, shoresOnStage, type HeightGrid, type Layers, type Point } from '../map.ts';
+import { blendGrid, divisionsOnStage, faultsOf, fitView, gridOnStage, heightAt, loadLayers, ringsOnStage, shoresOnStage, type Division, type HeightGrid, type Layers, type Point } from '../map.ts';
+import { signedArea } from '../lib/geom.mjs';
 
 /** 41 by 31 points 100 m apart over [-2000, -1500, 2000, 1500]: the ground rises 1 m a metre to the north, 0.01 m a metre to the east. */
 function slope(): HeightGrid {
@@ -91,4 +92,49 @@ test('blendGrid: a fine grid takes the heights of a coarse one on its edges and 
   const far: HeightGrid = { ...coarse, box: [5000, 5000, 7000, 7000] };
   assert.deepEqual(blendGrid(fine, far, { margin: 50 }).values, fine.values);
   assert.throws(() => blendGrid(fine, coarse, { margin: 0 }), /margin/);
+});
+
+/** Two divisions of a level side by side, their border a fine wiggle, and a finer one inside the west one. */
+function divisions(): Division[] {
+  const border: Point[] = Array.from({ length: 41 }, (_, k) => [Math.round(Math.sin(k) * 30 * 10) / 10, -2000 + k * 100]);
+  const west: Point[] = [[-3000, -2000], ...border, [-3000, 2000]].reverse() as Point[];
+  const east: Point[] = [[3000, -2000], [3000, 2000], ...[...border].reverse()];
+  return [
+    { id: 'west', name: 'West', level: 8, osm: 'relation/1', areaKm2: 12, at: [-1500, 0], ring: west.reverse(), pieces: [] },
+    { id: 'east', name: 'East', level: 8, osm: 'relation/2', areaKm2: 12, at: [1500, 0], ring: east, pieces: [] },
+    { id: 'quarter', name: 'Quarter', level: 9, osm: 'relation/3', areaKm2: 0.25, at: [-1000, 0], ring: [[-1250, -250], [-750, -250], [-750, 250], [-1250, 250]], pieces: [] },
+  ];
+}
+
+test('divisionsOnStage: neighbours thinned together on the stage keep one border, level by level, each with its label', () => {
+  const d = divisions();
+  for (const x of d) assert.ok(signedArea(x.ring) > 0, x.id);
+  const map = divisionsOnStage(view, d, { detail: 3 });
+  assert.deepEqual(map.divisions.map((x) => [x.id, x.level]), [['west', 8], ['east', 8], ['quarter', 9]]);
+  assert.deepEqual(map.borders.map((b) => [b.id, b.level, b.between]), [['east-west', 8, ['east', 'west']]]);
+  // The thinned border is the same points in both divisions and in its line.
+  const near = (rings: Point[][]): string[] => rings.flat().filter((p) => Math.abs(p[0]) < 40 && Math.abs(p[1]) < 600).map((p) => p.join(',')).sort();
+  const line = map.borders[0]!.lines.flat().filter((p) => Math.abs(p[1]) < 600).map((p) => p.join(',')).sort();
+  assert.deepEqual(near(map.divisions[0]!.rings), near(map.divisions[1]!.rings));
+  assert.deepEqual(near(map.divisions[0]!.rings), [...new Set(line)].sort());
+  assert.deepEqual(map.divisions[2]!.label, view.project([-1000, 0]));
+});
+
+test('faultsOf: divisions out of order, a label outside, an id twice, a border of a division not there, and a place off its frame are named', () => {
+  const town = loadLayers(new URL('../examples/valletta/layers.json', import.meta.url));
+  const d = divisions();
+  const ok: Layers = { ...town, city: { ...town.city, divisions: d, divisionBorders: [{ id: 'east-west', level: 8, between: ['east', 'west'], lines: [[[0, -2000], [0, 2000]]] }], places: [{ id: 'docks', name: 'Docks', kind: 'quarter', osm: 'node/1', at: [100, 100], lonlat: [14.5, 35.9] }] } };
+  const mine = (l: Layers): string[] => faultsOf(l).filter((f) => /division|places/.test(f));
+  assert.deepEqual(mine(ok), []);
+  const bad: Layers = {
+    ...ok,
+    city: {
+      ...ok.city,
+      divisions: [d[2]!, { ...d[0]!, at: [5000, 0] }, { ...d[1]!, id: 'quarter', ring: [...d[1]!.ring].reverse() }],
+      divisionBorders: [{ id: 'east-west', level: 8, between: ['east', 'west'], lines: [] }],
+      places: [{ ...ok.city.places![0]!, at: [1e9, 0] }],
+    },
+  };
+  const said = mine(bad).join('\n');
+  for (const fault of ['city.divisions: not in the order of their levels', 'city.divisions.west: its label point lies outside it', 'city.divisions.quarter: clockwise', 'city.divisions: an id given twice', 'city.divisionBorders.east-west: between a division that is not there', 'city.places.docks: outside its frame']) assert.ok(said.includes(fault), fault);
 });

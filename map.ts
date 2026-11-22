@@ -147,6 +147,36 @@ export interface CityFrameLayers {
   landmarks?: { id: string; name: string; built?: number; at: Point; lonlat: LonLat }[];
   /** The country round the city in its own plane: the land, the lakes, the rivers, the ground in bands of height. */
   terrain?: Terrain;
+  /**
+   * Administrative divisions below the country (OpenStreetMap's `admin_level`), cut to their view: the lowest level first,
+   * in a level the largest first, the order to paint them in. `ring` is a division's largest part in the view, `pieces` its
+   * other parts, `areaKm2` the area of what is in the view, `at` a point inside `ring` for its label, `osm` its relation.
+   * Neighbours of a level share their borders point for point. A division's holes are not cut out.
+   */
+  divisions?: Division[];
+  /**
+   * The lines to draw the divisions with as strokes, each once and never along the edge of the view: the border of two
+   * divisions (`between` their ids, in order), or the outline of all the divisions of a level where no other lies beyond it
+   * (`between` empty: a coast, the edge of a country).
+   */
+  divisionBorders?: { id: string; level: number; between: string[]; lines: Line[] }[];
+  /**
+   * Named places (OpenStreetMap's `place`: suburbs, quarters, neighbourhoods, towns...), in the order of the kinds asked for:
+   * a point each, and the outline of a place mapped as an area, cut to the view. `osm` is the element it comes from.
+   */
+  places?: { id: string; name: string; kind: string; osm: string; at: Point; lonlat: LonLat; ring?: Ring }[];
+}
+
+/** An administrative division of `CityFrameLayers.divisions`. */
+export interface Division {
+  id: string;
+  name: string;
+  level: number;
+  osm: string;
+  areaKm2: number;
+  at: Point;
+  ring: Ring;
+  pieces: Ring[];
 }
 
 /** layers.json as it is written: `region` in the region's frame, `city` in the city's. */
@@ -172,7 +202,9 @@ export function loadLayers(file: string | URL): Layers {
  * every outline runs counter-clockwise, does not cross itself and lies in its frame; the epochs
  * come in the order of their years with morph rings of one size; every hill has its rings; the bands
  * of a terrain come in the order to paint them, each with the band of its height; a grid of heights
- * holds a finite height for each of its points, which lie on the edges of its box.
+ * holds a finite height for each of its points, which lie on the edges of its box; the divisions come
+ * in the order of their levels, each with its label point inside it and an id of its own, and their
+ * borders name divisions that are there; every place stands in its frame.
  */
 export function faultsOf(l: Layers): string[] {
   const out: string[] = [];
@@ -219,6 +251,24 @@ export function faultsOf(l: Layers): string[] {
   }
   if (epochs.some((e, k) => k > 0 && e.year < epochs[k - 1]!.year)) out.push('city.epochs: not in the order of their years');
   if (new Set(epochs.map((e) => e.morph.length)).size > 1) out.push('city.epochs: morph rings of different sizes');
+  const point = (name: string, p: Point, box: Box): void => {
+    if (!(Number.isFinite(p[0]) && Number.isFinite(p[1]) && p[0] >= box[0] && p[0] <= box[2] && p[1] >= box[1] && p[1] <= box[3])) out.push(`${name}: outside its frame`);
+  };
+  const divisions = l.city.divisions ?? [];
+  for (const d of divisions) {
+    ring(`city.divisions.${d.id}`, d.ring, city);
+    for (const [k, r] of d.pieces.entries()) ring(`city.divisions.${d.id}.pieces.${k}`, r, city);
+    if (!pointInRing(d.at, d.ring)) out.push(`city.divisions.${d.id}: its label point lies outside it`);
+  }
+  if (divisions.some((d, k) => k > 0 && d.level < divisions[k - 1]!.level)) out.push('city.divisions: not in the order of their levels');
+  if (new Set(divisions.map((d) => d.id)).size < divisions.length) out.push('city.divisions: an id given twice');
+  const ids = new Set(divisions.map((d) => d.id));
+  for (const b of l.city.divisionBorders ?? []) if (b.between.some((id) => !ids.has(id))) out.push(`city.divisionBorders.${b.id}: between a division that is not there`);
+  for (const p of l.city.places ?? []) {
+    point(`city.places.${p.id}`, p.at, city);
+    if (p.ring) ring(`city.places.${p.id}.ring`, p.ring, city);
+  }
+  if (new Set((l.city.places ?? []).map((p) => p.id)).size < (l.city.places ?? []).length) out.push('city.places: an id given twice');
   const t = l.city.terrain;
   if (t) {
     if (t.levels.some((level, k) => k > 0 && level <= t.levels[k - 1]!)) out.push('city.terrain.levels: not in rising order');
@@ -789,4 +839,28 @@ export function worldOnStage(view: View, world: WorldLayers, o: WorldStageOption
   const lakes = world.lakes.map((l, k) => ({ id: l.id, name: l.name, rings: whole(water.shapes[k]!.rings).filter((r) => area(r) >= minArea) })).filter((l) => l.rings.length > 0);
   const sea = world.frame.outline ? cut(world.frame.outline).map((r) => dedupe(simplify(r, detail, true).map(([x, y]) => [tenth(x), tenth(y)] as Point), 0, true)) : [];
   return { sea, land: whole(t.land).filter((r) => area(r) >= minArea), gaps: whole(t.gaps.map((r) => orient(r, true))).filter((r) => area(r) >= minArea), countries, borders, lakes };
+}
+
+export interface DivisionsOnStage {
+  /** The divisions the view holds, in the layer's order (the lowest level first, in a level the largest first): `label` is `at` on the stage. */
+  divisions: { id: string; name: string; level: number; label: Point; rings: Point[][] }[];
+  /** Each border between two divisions of a level once, every one the view holds. */
+  borders: { id: string; level: number; between: [string, string]; lines: Point[][] }[];
+}
+
+/**
+ * A city's divisions on the stage as a world map's countries are (`worldOnStage`, with its options): cut to the view and
+ * its margin and thinned together again, level by level, so two neighbours keep one border on the stage too, and areas
+ * shaded along the divisions meet with no hairline between them. A division inside another of its level borders it.
+ */
+export function divisionsOnStage(view: View, divisions: readonly Division[], o: WorldStageOptions = {}): DivisionsOnStage {
+  const out: DivisionsOnStage = { divisions: [], borders: [] };
+  for (const level of [...new Set(divisions.map((d) => d.level))]) {
+    const countries = divisions.filter((d) => d.level === level).map((d) => ({ id: d.id, name: d.name, continent: '', label: d.at, areaKm2: d.areaKm2, rings: [d.ring, ...d.pieces] }));
+    const frame: WorldFrame = { projection: 'laea', centre: [0, 0], box: view.box, lonlat: view.box };
+    const map = worldOnStage(view, { format: 'world-geo/1', id: 'divisions', name: '', units: '', made: { scale: 0, detail: 0, minArea: 0, lakes: null }, frame, land: [], gaps: [], countries, boundaries: [], lakes: [] }, o);
+    out.divisions.push(...map.countries.map((c) => ({ id: c.id, name: c.name, level, label: c.label, rings: c.rings })));
+    out.borders.push(...map.borders.map((b) => ({ id: b.id, level, between: b.between, lines: b.lines })));
+  }
+  return out;
 }

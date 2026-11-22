@@ -33,7 +33,7 @@ import { area } from './lib/geom.mjs';
 import { readRaster } from './lib/tiff.mjs';
 import { unzip } from './lib/zip.mjs';
 import { overpass } from './lib/fetch.mjs';
-import { areasOfAnswer, buildBuiltUp, buildEpochs, buildLandmarks, buildRegion, buildRelief, buildStreets, buildTerrain, buildWall, buildWater, featuresOf, riverOf, terrainPlan, urbanAreas } from './lib/layers.mjs';
+import { areasOfAnswer, buildBuiltUp, buildDivisions, buildEpochs, buildLandmarks, buildPlaces, buildRegion, buildRelief, buildStreets, buildTerrain, buildWall, buildWater, divisionLevels, featuresOf, placeKinds, riverOf, roadsOf, streetClasses, terrainPlan, urbanAreas } from './lib/layers.mjs';
 import { centreOf, overpassBox, overpassDate, readOverpass, waysOf } from './lib/osm.mjs';
 import { projectBox, projection, unprojectBox } from './lib/project.mjs';
 import { awmc, AWMC_COMMIT, awmcName, copernicusTile, copernicusWaterMask, licencesWith, NATURAL_EARTH_VERSION, naturalEarth, tilesOf } from './lib/sources.mjs';
@@ -166,9 +166,24 @@ export function requestsOf(spec, frames) {
   if (spec.streets) {
     const b = overpassBox(boxOfLayer(spec.streets, frames).lonlat);
     const source = spec.streets.from ?? 'osm';
-    if (source !== 'osm' && source !== 'ohm') throw new Error(`streets: "from" is "osm" or "ohm", not "${source}"`);
-    const classes = (spec.streets.classes ?? ['motorway', 'trunk', 'primary']).join('|');
-    out.streets = { source, id: `${spec.city}-${source}-streets`, query: ql([`way["highway"~"^(${classes})$"](${b});`], 'out geom;') };
+    if (source !== 'osm' && source !== 'ohm' && source !== 'natural-earth') throw new Error(`streets: "from" is "osm", "ohm" or "natural-earth", not "${source}"`);
+    // Natural Earth's roads are a file of its own, not a query: only its classes are held to what it has.
+    const classes = streetClasses(spec.streets).join('|');
+    if (source !== 'natural-earth') out.streets = { source, id: `${spec.city}-${source}-streets`, query: ql([`way["highway"~"^(${classes})$"](${b});`], 'out geom;') };
+  }
+  if (spec.divisions) {
+    const b = overpassBox(boxOfLayer(spec.divisions, frames).lonlat);
+    const source = spec.divisions.from ?? 'osm';
+    if (source !== 'osm') throw new Error(`divisions: "from" is "osm", not "${source}"`);
+    const levels = divisionLevels(spec.divisions).join('|');
+    out.divisions = { source, id: `${spec.city}-osm-divisions`, query: ql([`relation["boundary"="administrative"]["admin_level"~"^(${levels})$"](${b});`], 'out geom;') };
+  }
+  if (spec.places) {
+    const b = overpassBox(boxOfLayer(spec.places, frames).lonlat);
+    const source = spec.places.from ?? 'osm';
+    if (source !== 'osm') throw new Error(`places: "from" is "osm", not "${source}"`);
+    const kinds = placeKinds(spec.places).join('|');
+    out.places = { source, id: `${spec.city}-osm-places`, query: ql(['node', 'way', 'relation'].map((type) => `${type}["place"~"^(${kinds})$"]["name"](${b});`), 'out geom;') };
   }
   if (spec.builtUp && (spec.builtUp.from ?? 'osm') === 'osm') {
     const b = overpassBox(boxOfLayer(spec.builtUp, frames).lonlat);
@@ -469,10 +484,18 @@ export async function run(argv, { root = process.cwd(), command = 'build.mjs', s
   }
 
   if (spec.streets) {
-    const { box } = boxOfLayer(spec.streets, frames);
+    const { box, lonlat } = boxOfLayer(spec.streets, frames);
     const source = spec.streets.from ?? 'osm';
-    cityLayers.streets = buildStreets(spec.streets, { ...frames.city, box }, answers.streets);
-    use('city.streets', source, `highways of ${SOURCE_NAME[source]}: ${(spec.streets.classes ?? ['motorway', 'trunk', 'primary']).join(', ')}${source === 'ohm' ? ', each with the years it stood' : ''}`);
+    if (source === 'natural-earth') {
+      log('streets: Natural Earth');
+      const got = await naturalEarth({ cache, name: 'ne_10m_roads', offline, log });
+      const path = note('ne_10m_roads', 'natural-earth', `natural-earth ${NATURAL_EARTH_VERSION} ne_10m_roads.geojson`, got, NATURAL_EARTH_VERSION);
+      cityLayers.streets = buildStreets(spec.streets, { ...frames.city, box }, roadsOf(path, lonlat));
+      use('city.streets', 'natural-earth', `roads of Natural Earth ${NATURAL_EARTH_VERSION}, 1:10m: ${streetClasses(spec.streets).join(', ')} (a country's main roads, a point every few kilometres)`);
+    } else {
+      cityLayers.streets = buildStreets(spec.streets, { ...frames.city, box }, answers.streets);
+      use('city.streets', source, `highways of ${SOURCE_NAME[source]}: ${(spec.streets.classes ?? ['motorway', 'trunk', 'primary']).join(', ')}${source === 'ohm' ? ', each with the years it stood' : ''}`);
+    }
     log(`  streets ${cityLayers.streets.length}, ${Math.round(cityLayers.streets.reduce((sum, x) => sum + x.lengthKm, 0))} km`);
   }
 
@@ -533,6 +556,24 @@ export async function run(argv, { root = process.cwd(), command = 'build.mjs', s
     const byHand = spec.landmarks.filter((l) => !l.ohm && !l.osm);
     if (byHand.length > 0) notes.push({ layer: 'city.landmarks', name: `Landmarks placed by hand: ${byHand.map((l) => l.name).join(', ')}`, source: spec.landmarksSource ?? '', made: [] });
     log(`  landmarks: ${cityLayers.landmarks.map((l) => l.id).join(', ')}`);
+  }
+
+  if (spec.divisions) {
+    const { box } = boxOfLayer(spec.divisions, frames);
+    const { divisions, borders } = buildDivisions(spec.divisions, { ...frames.city, box }, answers.divisions);
+    cityLayers.divisions = divisions;
+    cityLayers.divisionBorders = borders;
+    const levels = divisionLevels(spec.divisions);
+    use('city.divisions', 'osm', `administrative boundaries of OpenStreetMap (boundary=administrative, admin_level ${levels.join(', ')})${spec.divisions.names ? `, by name: ${spec.divisions.names.join(', ')}` : ''}; the divisions of a level thinned together, so that neighbours share their borders point for point`);
+    use('city.divisionBorders', 'osm', 'the borders between those divisions, and their outline, from the same boundaries');
+    log(`  divisions: ${levels.map((level) => `level ${level}: ${divisions.filter((d) => d.level === level).length}`).join('; ')}; ${borders.length} border line(s); ${divisions.reduce((n, d) => n + d.ring.length + d.pieces.reduce((m, p) => m + p.length, 0), 0)} points`);
+  }
+
+  if (spec.places) {
+    const { box } = boxOfLayer(spec.places, frames);
+    cityLayers.places = buildPlaces(spec.places, { ...frames.city, box }, answers.places);
+    use('city.places', 'osm', `named places of OpenStreetMap (place=${placeKinds(spec.places).join(', ')}): a point each, and the outline of those mapped as areas`);
+    log(`  places: ${cityLayers.places.length} (${placeKinds(spec.places).map((k) => `${k} ${cityLayers.places.filter((p) => p.kind === k).length}`).join(', ')})`);
   }
 
   writeFileSync(join(outDir, 'layers.json'), stringify(layers));
