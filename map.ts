@@ -165,6 +165,45 @@ export interface CityFrameLayers {
    * a point each, and the outline of a place mapped as an area, cut to the view. `osm` is the element it comes from.
    */
   places?: { id: string; name: string; kind: string; osm: string; at: Point; lonlat: LonLat; ring?: Ring }[];
+  /**
+   * Named features that no other layer has a kind for, in the order of the spec: open lines (a channel, a railway, a
+   * runway, an open wall, a street picked by name) and areas (a basin, a lake long filled, a building's footprint, an
+   * old district), from mapped elements or drawn after a written source, each cut to its view.
+   */
+  features?: Feature[];
+}
+
+/** A feature of `CityFrameLayers.features`: a line or an area, with the years it stood where the spec gives them. */
+export type Feature = LineFeature | AreaFeature;
+
+interface FeatureBase {
+  id: string;
+  name: string;
+  /** The year it was built, and the year it was gone by (negative before the common era). */
+  built?: number;
+  until?: number;
+}
+
+export interface LineFeature extends FeatureBase {
+  kind: 'line';
+  /** The whole line, also where its view cuts it. */
+  lengthKm: number;
+  /** The line cut to its view: its ways joined end to end, the longest first, each from its end nearer the start. */
+  lines: Line[];
+  /**
+   * Where the spec marks stretches below the ground: the line in stretches, in order from its start, each above or
+   * below the ground, from and to so many kilometres along it, cut to the view (a stretch wholly outside it is left out).
+   */
+  stretches?: { under: boolean; fromKm: number; toKm: number; lines: Line[] }[];
+}
+
+export interface AreaFeature extends FeatureBase {
+  kind: 'area';
+  /** All of it in its view. */
+  areaHa: number;
+  /** Its largest part in its view; `pieces` are the others, the largest first. An area keeps no holes. */
+  ring: Ring;
+  pieces: Ring[];
 }
 
 /** An administrative division of `CityFrameLayers.divisions`. */
@@ -204,7 +243,9 @@ export function loadLayers(file: string | URL): Layers {
  * of a terrain come in the order to paint them, each with the band of its height; a grid of heights
  * holds a finite height for each of its points, which lie on the edges of its box; the divisions come
  * in the order of their levels, each with its label point inside it and an id of its own, and their
- * borders name divisions that are there; every place stands in its frame.
+ * borders name divisions that are there; every place stands in its frame; every feature has an id of its own,
+ * lines of two points or more in its frame and stretches in order along it, or rings that keep to the format,
+ * and ends no earlier than it is built.
  */
 export function faultsOf(l: Layers): string[] {
   const out: string[] = [];
@@ -269,6 +310,29 @@ export function faultsOf(l: Layers): string[] {
     if (p.ring) ring(`city.places.${p.id}.ring`, p.ring, city);
   }
   if (new Set((l.city.places ?? []).map((p) => p.id)).size < (l.city.places ?? []).length) out.push('city.places: an id given twice');
+  const features = l.city.features ?? [];
+  const open = (name: string, pts: readonly Point[]): void => {
+    const m = (city[2] - city[0]) * 0.02 + 1;
+    if (pts.length < 2) out.push(`${name}: ${pts.length} point(s)`);
+    else if (pts.some((p) => !Number.isFinite(p[0]) || !Number.isFinite(p[1]) || p[0] < city[0] - m || p[0] > city[2] + m || p[1] < city[1] - m || p[1] > city[3] + m)) out.push(`${name}: a point outside its frame`);
+  };
+  for (const f of features) {
+    const name = `city.features.${f.id}`;
+    if (f.built !== undefined && f.until !== undefined && f.until < f.built) out.push(`${name}: it ends before it is built`);
+    if (f.kind === 'area') {
+      ring(name, f.ring, city);
+      for (const [k, r] of f.pieces.entries()) ring(`${name}.pieces.${k}`, r, city);
+      continue;
+    }
+    if (f.lines.length === 0) out.push(`${name}: no line`);
+    for (const [k, line] of f.lines.entries()) open(`${name}.lines.${k}`, line);
+    const stretches = f.stretches ?? [];
+    for (const [k, s] of stretches.entries()) {
+      for (const [j, line] of s.lines.entries()) open(`${name}.stretches.${k}.lines.${j}`, line);
+      if (!(s.toKm > s.fromKm) || (k > 0 && s.fromKm < stretches[k - 1]!.toKm) || s.toKm > f.lengthKm + 0.01) out.push(`${name}.stretches.${k}: not in order along the line`);
+    }
+  }
+  if (new Set(features.map((f) => f.id)).size < features.length) out.push('city.features: an id given twice');
   const t = l.city.terrain;
   if (t) {
     if (t.levels.some((level, k) => k > 0 && level <= t.levels[k - 1]!)) out.push('city.terrain.levels: not in rising order');

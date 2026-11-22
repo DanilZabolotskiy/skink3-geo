@@ -33,7 +33,7 @@ import { area } from './lib/geom.mjs';
 import { readRaster } from './lib/tiff.mjs';
 import { unzip } from './lib/zip.mjs';
 import { overpass } from './lib/fetch.mjs';
-import { areasOfAnswer, buildBuiltUp, buildDivisions, buildEpochs, buildLandmarks, buildPlaces, buildRegion, buildRelief, buildStreets, buildTerrain, buildWall, buildWater, divisionLevels, featuresOf, placeKinds, riverOf, roadsOf, streetClasses, terrainPlan, urbanAreas } from './lib/layers.mjs';
+import { areasOfAnswer, buildBuiltUp, buildDivisions, buildEpochs, buildFeature, buildLandmarks, buildPlaces, buildRegion, buildRelief, buildStreets, buildTerrain, buildWall, buildWater, checkFeatures, divisionLevels, elementLines, featuresOf, placeKinds, riverOf, roadsOf, streetClasses, terrainPlan, urbanAreas } from './lib/layers.mjs';
 import { centreOf, overpassBox, overpassDate, readOverpass, waysOf } from './lib/osm.mjs';
 import { projectBox, projection, unprojectBox } from './lib/project.mjs';
 import { awmc, AWMC_COMMIT, awmcName, copernicusTile, copernicusWaterMask, licencesWith, NATURAL_EARTH_VERSION, naturalEarth, tilesOf } from './lib/sources.mjs';
@@ -205,6 +205,15 @@ export function requestsOf(spec, frames) {
   if (checks.length > 0) {
     const b = overpassBox(boxOfLayer({ view: checks[0].check.view }, frames).lonlat);
     out.wallCheck = { source: 'osm', id: `${spec.city}-osm-wall-check`, query: ql([`way["barrier"="city_wall"](${b});`, `way["historic"~"^(citywalls|city_wall)$"](${b});`], 'out geom;', 120) };
+  }
+  if (spec.features !== undefined) {
+    // The features: their elements, each asked for once, of the sources they name.
+    checkFeatures(spec.features);
+    for (const f of spec.features) boxOfLayer(f, frames);
+    for (const source of ['ohm', 'osm']) {
+      const ids = [...new Set(spec.features.flatMap((f) => f.from[source] ?? []))];
+      if (ids.length > 0) out[`features-${source}`] = { source, id: `${spec.city}-${source}-features`, query: ql(ids.map((id) => byId(id, 'features')), 'out geom;', 120) };
+    }
   }
   return out;
 }
@@ -574,6 +583,33 @@ export async function run(argv, { root = process.cwd(), command = 'build.mjs', s
     cityLayers.places = buildPlaces(spec.places, { ...frames.city, box }, answers.places);
     use('city.places', 'osm', `named places of OpenStreetMap (place=${placeKinds(spec.places).join(', ')}): a point each, and the outline of those mapped as areas`);
     log(`  places: ${cityLayers.places.length} (${placeKinds(spec.places).map((k) => `${k} ${cityLayers.places.filter((p) => p.kind === k).length}`).join(', ')})`);
+  }
+
+  if (spec.features) {
+    // Named features beyond the fixed kinds: lines and areas of mapped elements, or drawn after a written source.
+    cityLayers.features = [];
+    for (const f of spec.features) {
+      const { box } = boxOfLayer(f, frames);
+      const mapped = [];
+      for (const source of ['ohm', 'osm']) {
+        if (!f.from[source]) continue;
+        const got = elementLines(answers[`features-${source}`], f.from[source], f.kind === 'area' ? (role) => role !== 'inner' : undefined);
+        if (got.missing.length > 0) throw new Error(`feature ${f.id}: ${SOURCE_NAME[source]} has no ${got.missing.join(', ')}`);
+        mapped.push(...got.lines);
+      }
+      const built = buildFeature(f, { ...frames.city, box }, mapped);
+      cityLayers.features.push(built);
+      const layer = `city.features: ${f.id}`;
+      const from = [f.from.ohm ? `OpenHistoricalMap ${f.from.ohm.join(', ')}` : null, f.from.osm ? `OpenStreetMap ${f.from.osm.join(', ')}` : null, f.from.points ? `drawn by hand through ${f.from.points.length} points` : null].filter(Boolean).join('; ');
+      if (f.from.ohm) use(layer, 'ohm', from);
+      if (f.from.osm) use(layer, 'osm', from);
+      if (!f.from.ohm && !f.from.osm) use(layer, 'own', from);
+      const year = (y) => (y < 0 ? `${-y} BC` : `AD ${y}`);
+      const years = f.built !== undefined || f.until !== undefined ? `${f.built !== undefined ? `built ${year(f.built)}` : 'built at a time not given'}${f.until !== undefined ? `, gone by ${year(f.until)}` : ''}` : null;
+      const under = built.stretches ? `below the ground: ${f.under.map(([a, b]) => `${a} to ${b} km`).join(', ')} of its ${built.lengthKm} km` : null;
+      notes.push({ layer, name: f.name, source: f.source, made: [from, years, under].filter(Boolean) });
+      log(`  feature ${f.id}: ${f.kind === 'line' ? `${built.lengthKm} km, ${built.lines.length} line(s) in the view${built.stretches ? `, ${built.stretches.length} stretch(es)` : ''}` : `${built.areaHa} ha in the view, ${1 + built.pieces.length} part(s)`}`);
+    }
   }
 
   writeFileSync(join(outDir, 'layers.json'), stringify(layers));

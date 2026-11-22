@@ -1,6 +1,6 @@
 # skink3-geo
 
-Real geographic data turned into the simplified vector layers a city's map is drawn from: the country round it, the terrain of its surroundings in bands of height, the sea and the rivers in their true width, the relief, walls, main streets or a country's main roads, the administrative divisions and the named quarters of a city, the built-up land, and the city's outline through time, ready to grow from one epoch into the next; a round body for a globe, the Earth or the Moon, in degrees; and a flat map of the whole world, or of the countries round a place, with the outline of every country. One spec a city, one command, and the same bytes every time, with the credit of every source written out.
+Real geographic data turned into the simplified vector layers a city's map is drawn from: the country round it, the terrain of its surroundings in bands of height, the sea and the rivers in their true width, the relief, walls, main streets or a country's main roads, the administrative divisions and the named quarters of a city, named features no other layer has a kind for (a channel, a railway, a basin long filled, the footprint of a building, an old district: open lines and areas from mapped elements or drawn after a written source, with their years and their stretches below the ground), the built-up land, and the city's outline through time, ready to grow from one epoch into the next; a round body for a globe, the Earth or the Moon, in degrees; and a flat map of the whole world, or of the countries round a place, with the outline of every country. One spec a city, one command, and the same bytes every time, with the credit of every source written out.
 
 It is made for animated maps (the scenes of [skink3-engine](https://github.com/DanilZabolotskiy/skink3-engine) among them), but it draws nothing and depends on no renderer: its output is one JSON file of points in metres (in degrees, for a globe).
 
@@ -98,6 +98,7 @@ A frame gives its `centre` (`[lon, lat]`), its `box` in metres (`[x0, y0, x1, y1
 | `city.epochs[]` | `{ id, year, name, areaHa, ring, morph }`: the city's outline through time, the earliest first; a year BC is negative |
 | `city.landmarks[]` | `{ id, name, built?, at, lonlat }` |
 | `city.terrain` | `{ view?, box, cell, levels[], land[], bands[], lakes[], rivers[], grid? }`: the country round the city, for a map with depth, in the city's own plane with points to 1 m. See "The terrain" |
+| `city.features[]` | a line `{ id, name, kind: 'line', built?, until?, lengthKm, lines[], stretches? }` or an area `{ id, name, kind: 'area', built?, until?, areaHa, ring, pieces[] }`, in the order of the spec, each cut to its view. See "The features" |
 
 **The terrain.** A wide view (a coast, a plain, the hills round it) is too large for the city's fine layers and too close for the region's, so it has a layer of its own, made from the elevation model at the scale of the view: the tiles are read in blocks, each cell of the grid is the mean height of the ground it covers, and the grid is smoothed, so that a form is soft and nothing is a speck.
 
@@ -112,6 +113,13 @@ The heights are those of today. The coast is today's too, unless the spec takes 
 **The grid of heights.** A relief or a terrain whose spec asks for it (`grid`) also holds the ground it was traced from, smoothed as its lines are or as the spec says (`grid: { smooth }`), as a grid of heights for a renderer that lights the ground itself (relief shading), which reads as one rolling surface where bands read as steps. `cols` by `rows` points lie `cell` metres apart, from the north-west corner of `box` to its south-east corner, so the points lie on its edges; `values` holds their heights in metres, to a tenth, row by row from the north, each row from the west, as an image holds its pixels. A terrain's grid is held to the first of its `levels` along the sea, as its bands are. It is large (a value a point): a scene takes the part its view shows with `gridOnStage`, and a spec that covers a wide box asks for a coarser `cell`.
 
 **The morph.** Every epoch of a city has a second outline, `morph`, of the same number of points (160) set at equal steps along it, counter-clockwise and turned so that point *k* of one epoch lies nearest to point *k* of the next. A scene that draws the two as one region with the same point count grows the city from one epoch into the next with no further work. An outline with far more detail than 160 points can hold (a city of today, with its inlets and arms) is calmed first, so its `morph` follows its body and its `ring` keeps the detail.
+
+**The features.** A thing of the map that no other layer has a kind for comes as a feature: an open line (a water channel, a railway, a runway, an open wall, a street picked by name) or an area (a harbour basin, a lake long filled, the footprint of a building, an old district).
+
+- A line's ways are joined end to end where their ends meet; the points drawn by hand are one more way. Each line begins at its end nearer the spec's `start` (the first point given, by default), and the longest comes first. `lines` are cut to the view; `lengthKm` is the whole of it, also where the view cuts it.
+- `stretches`, where the spec marks stretches below the ground (`under`, in kilometres from the start): the line in order from its start, each `{ under, fromKm, toKm, lines }` cut to the view, one running into the next. A scene draws a stretch below the ground dashed or faint, and the line whole for a light that runs along it.
+- An area's ways close into rings (a relation's inner ways are left out: an area keeps no holes); the points drawn by hand are a ring more. `ring` is its largest part in the view, `pieces` the others, the largest first; `areaHa` is all of it in the view.
+- `built` and `until` are the years the spec gives (a year BC is negative). The dates of the elements in OpenHistoricalMap are not read, nor are their tunnel tags: the spec says what it means.
 
 Heights come from a surface model, so they include buildings and trees, and are smoothed: a hill's `height` is good to a few metres and is not a figure to put on screen.
 
@@ -138,6 +146,9 @@ const core = blendGrid(town.city.relief!.grid!, town.city.terrain!.grid!, { marg
 
 const parts = divisionsOnStage(view, town.city.divisions!);                      // { divisions, borders }: one border for two neighbours
 const names = town.city.places!.map((p) => ({ name: p.name, at: view.project(p.at) }));   // a named quarter on the stage
+
+const channel = town.city.features!.find((f) => f.id === 'channel');             // a line, or an area: check `kind`
+if (channel?.kind === 'line') for (const s of channel.stretches ?? []) linesOnStage(view, s.lines);   // dashed where s.under
 ```
 
 - `fitView(box, { w, h, at? }, { mode?, zoom?, shift? })` shows a box of the plane on the stage: `cover` (the default) fills the stage, `contain` shows the whole box; `zoom` and `shift` (metres) frame a part of it. The view turns y down.
@@ -148,6 +159,7 @@ const names = town.city.places!.map((p) => ({ name: p.name, at: view.project(p.a
 - `heightAt(grid, [x, y])` reads the height of the ground at a place of the frame (metres) off a grid of heights, between its four nearest points; null outside the grid.
 - `blendGrid(fine, coarse, { margin })` eases a fine grid into a coarse one: within `margin` metres of its edge its heights turn along a smooth curve to those of the coarse grid, which they are on the edge itself. A relief of a city's core drawn from it over a relief of its country meets it without a seam.
 - `divisionsOnStage(view, divisions, { detail?, minArea?, margin? })` fits a city's divisions to the stage as `worldOnStage` fits countries (its options, its defaults): cut to the view and its margin and thinned together again, level by level, so that two neighbours keep one border on the stage too and their fills meet with no hairline; a division inside another of its level borders it. `divisions` come in the layer's order, each with its `label` on the stage; `borders`, `{ id, level, between, lines }`, are the lines between two of them. `ringsOnStage` on each division alone thins each outline apart, and neighbours can part by a hairline. The layer's `divisionBorders` hold the same borders and the outer outline in metres, for `linesOnStage`.
+- A feature goes on the stage as any line or ring does: `linesOnStage` for a line's `lines` or the `lines` of each of its `stretches`, `ringsOnStage` for an area's `ring` and `pieces`.
 - `toFrame(frame)` projects a `[lon, lat]` the layers do not hold.
 - `faultsOf(layers)` lists what is wrong with a city's layers (an outline that runs clockwise, crosses itself or leaves its frame; epochs out of step; the bands of a terrain out of their order): a project's test holds each of its cities to an empty list.
 
@@ -251,6 +263,7 @@ worldFaults(world);                                                             
 | `builtUp` | `view`, `from` (`ghsl`, `osm` or `natural-earth`), `years` (of `ghsl`), `share` (the share of the ground built on from which a cell counts, 0.2), `bridge` (gaps under twice this many metres are closed, so the city is one body), `round`, `minPiece` |
 | `epochs[]` | `{ id, year, name, outline, source, note? }`; the outline is `{ hill }`, `{ wall }`, `{ points: [[lon, lat], ...] }` drawn by hand, `{ builtUp: 2020 }` (the built-up city of that year) or `{ builtUp: true }` (the latest) |
 | `landmarks[]` | `{ id, name, built?, at \| ohm \| osm }`: a place given by hand, or the middle of a mapped element |
+| `features[]` | `{ id, name, kind, from, start?, built?, until?, under?, view?, detail?, smooth?, source }`: `kind` is `line` or `area`; `from` is `{ ohm?, osm?, points? }`, the ways and relations of OpenHistoricalMap or OpenStreetMap (`way/<id>`, `relation/<id>`), points `[[lon, lat], ...]` drawn by hand after a written source, or both; `start` (a line, `[lon, lat]`) the end it begins at; `built` and `until` the years it stood; `under` (a line) its stretches below the ground, `[[from, to], ...]` in kilometres from its start, in order and none over another; `view` the view it is cut to (the whole city frame by default); `detail` the thinning in metres (2); `smooth` how many times its corners are cut, a quarter of each side at a time (0); `source` the sentence `SOURCES.md` gives for it: the written source it is drawn after, or what the map shows. Its elements are asked for only when a feature names them |
 
 Every source a layer names in `from` is required: a source that does not answer stops the build, and nothing falls back in silence, so the layers are a function of the spec and the downloads alone.
 
@@ -266,8 +279,8 @@ Only open data is read. The table of sources is `lib/sources.mjs`; a source come
 | LROC Global Mare Boundaries (Nelson et al. 2014), in NASA's Planetary Data System | the Moon's maria for a globe | public domain | not required, the line in `SOURCES.md` |
 | Copernicus DEM GLO-30 and its water body mask | relief and terrain; sea, lakes and wide rivers | free with attribution | **required**, the line in `SOURCES.md` |
 | Global Human Settlement Layer, GHS-BUILT-S R2023A (European Commission, JRC) | the built-up city of 1975 to today | free and open, reuse with acknowledgment of the source | **required**, the line in `SOURCES.md` |
-| OpenHistoricalMap | walls, rivers, streets with their years, landmarks | CC0 | not required |
-| OpenStreetMap | water, streets, land use, a wall check, administrative divisions, named places | ODbL | **required**: © OpenStreetMap contributors |
+| OpenHistoricalMap | walls, rivers, streets with their years, landmarks, features | CC0 | not required |
+| OpenStreetMap | water, streets, land use, a wall check, administrative divisions, named places, features | ODbL | **required**: © OpenStreetMap contributors |
 | Ancient World Mapping Center geodata, at a fixed commit | the coast of the ancient world, where a terrain asks for it | ODbL | **required**, the line in `SOURCES.md` |
 | SRTM | relief, where a spec names an HGT file | public domain | not required |
 
@@ -280,7 +293,7 @@ Only open data is read. The table of sources is `lib/sources.mjs`; a source come
 
 ## The tests
 
-`test/geom.test.ts` holds the plane geometry and the projection; `test/pipeline.test.mjs` the readers (TIFF, BigTIFF, LZW, ZIP), the grids and contours, the hills, the tiles read by the scale, the terrain of an island made in the test, the grids of heights of a relief and a terrain, the built-up outline, walls, epochs, the spec of a new city and the options of a project of its own, all on inputs made in the test; `test/example.test.ts` holds the committed example to the format and to what `map.ts` makes of it on a stage, its terrain in tiles included; `test/stage.test.ts` the shores of water cut by a view, a grid of heights fitted to a stage, the height at a place, a fine grid eased into a coarse one, and the faults of a grid; `test/globe.test.ts` the committed Earth and Moon to their format, rings measured, oriented, made whole and thinned on the sphere, a shapefile made in the test, and globes built from collections made in the test; `test/world.test.ts` the committed world and box to their format, the Equal Earth projection, outlines thinned together, and maps built from collections made in the test; `test/osm-layers.test.mjs` the divisions (a shared border, the cut, the label, the levels, the names, what is refused), the named places, the roads of Natural Earth, their requests, and a build from a cache made in the test, a spec that asks for none of them included; `test/stage.test.ts` also the divisions on a stage and the faults of divisions and places. They download nothing.
+`test/geom.test.ts` holds the plane geometry and the projection; `test/pipeline.test.mjs` the readers (TIFF, BigTIFF, LZW, ZIP), the grids and contours, the hills, the tiles read by the scale, the terrain of an island made in the test, the grids of heights of a relief and a terrain, the built-up outline, walls, epochs, the spec of a new city and the options of a project of its own, all on inputs made in the test; `test/example.test.ts` holds the committed example to the format and to what `map.ts` makes of it on a stage, its terrain in tiles included; `test/stage.test.ts` the shores of water cut by a view, a grid of heights fitted to a stage, the height at a place, a fine grid eased into a coarse one, and the faults of a grid; `test/globe.test.ts` the committed Earth and Moon to their format, rings measured, oriented, made whole and thinned on the sphere, a shapefile made in the test, and globes built from collections made in the test; `test/world.test.ts` the committed world and box to their format, the Equal Earth projection, outlines thinned together, and maps built from collections made in the test; `test/osm-layers.test.mjs` the divisions (a shared border, the cut, the label, the levels, the names, what is refused), the named places, the roads of Natural Earth, their requests, and a build from a cache made in the test, a spec that asks for none of them included; `test/features.test.mjs` the features (a line joined from ways and points, its start, its cut and its stretches below the ground, an area from a closed way, a relation without its hole, points drawn and a cut into pieces, what is refused, the faults they are held to, their requests, and a build from a cache made in the test, a spec without them included); `test/stage.test.ts` also the divisions on a stage and the faults of divisions and places. They download nothing.
 
 ## Rules
 
@@ -299,6 +312,7 @@ Only open data is read. The table of sources is `lib/sources.mjs`; a source come
 - A terrain whose view reaches the open sea does not build `--offline`: the tiles the elevation model lacks there are not in the cache, and only a run online learns that they are missing.
 - Only the GeoJSON files of the Ancient World Mapping Center are read: its open water by sea, one coast for all antiquity. Its shapefiles of the water of single periods are not.
 - Heights are of a surface model: a hill's `height` includes roofs, and a terrain's bands the woods.
+- Features have run on answers made in the tests only, not yet on a real answer of Overpass. Their years and their stretches below the ground come from the spec: the dates and the tunnel tags of the elements are not read.
 
 ## License
 

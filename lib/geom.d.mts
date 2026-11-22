@@ -23,5 +23,6 @@ export function resample(points: readonly Point[], n: number, closed?: boolean):
 export function alignTo(ring: readonly Point[], ref: readonly Point[]): Point[];
 export function morphRings(rings: readonly (readonly Point[])[], n: number): Point[][];
 export function clipLine(points: readonly Point[], box: Box): Point[][];
+export function sliceLine(points: readonly Point[], from: number, to: number): Point[];
 export function closeChains(chains: readonly (readonly Point[])[], box: Box): Point[][];
 export function clipRing(ring: readonly Point[], box: Box): Point[][];
