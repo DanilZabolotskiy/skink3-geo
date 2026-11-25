@@ -1,6 +1,6 @@
 # skink3-geo
 
-Real geographic data turned into the simplified vector layers a city's map is drawn from: the country round it, the terrain of its surroundings in bands of height, the sea and the rivers in their true width, the relief, walls, main streets or a country's main roads, the administrative divisions and the named quarters of a city, named features no other layer has a kind for (a channel, a railway, a basin long filled, the footprint of a building, an old district: open lines and areas from mapped elements or drawn after a written source, with their years and their stretches below the ground), the built-up land, and the city's outline through time, ready to grow from one epoch into the next; a round body for a globe, the Earth or the Moon, in degrees; and a flat map of the whole world, or of the countries round a place, with the outline of every country. One spec a city, one command, and the same bytes every time, with the credit of every source written out.
+Real geographic data turned into the simplified vector layers a city's map is drawn from: the country round it, the terrain of its surroundings in bands of height, the sea and the rivers in their true width, the relief, walls, main streets or a country's main roads, the administrative divisions and the named quarters of a city, named features no other layer has a kind for (a channel, a railway, a basin long filled, the footprint of a building, an old district: open lines and areas from mapped elements or drawn after a written source, with their years and their stretches below the ground), the built-up land, and the city's outline through time, ready to grow from one epoch into the next; a round body for a globe, the Earth or the Moon, in degrees; and a flat map of the whole world, or of the countries round a place, with the outline of every country, and with its sea lanes, its named ports, airports and lines, and its heights, depths and shallows where a map asks for them; and the shortest way along a network of lines, as one polyline to draw on. One spec a city, one command, and the same bytes every time, with the credit of every source written out.
 
 It is made for animated maps (the scenes of [skink3-engine](https://github.com/DanilZabolotskiy/skink3-engine) among them), but it draws nothing and depends on no renderer: its output is one JSON file of points in metres (in degrees, for a globe).
 
@@ -209,12 +209,16 @@ A project builds its own globes with `runGlobe(argv, { root, command })` from `s
 ```
 node world.mjs --root examples --lakes 2 --preview                                   # the whole world at 1:50m: examples/world/
 node world.mjs --map slovenia --name Slovenia --bbox 8.5,42.6,21.5,49.6 --lakes 6 --root examples   # a box at 1:10m: examples/slovenia/
+node world.mjs --map pacific --centre=150 --lanes --root examples                    # the whole world round 150° E, with the sea lanes
+node world.mjs --map islands --bbox 172,-24,-170,-12 --lanes --features islands.json --heights --shallows 50,200   # a box across 180°
 node world.mjs --offline                                                             # from the cache alone; --update takes a changed source
 ```
 
 - `--scale` is that of Natural Earth: 50 for the world, 10 for a box by default. `--detail` thins the outlines to that many metres (by default half a unit of a 1920 by 1080 stage that the map covers), `--min-area` leaves out islands smaller than that many km² (by default a square six times `--detail` on a side), but every country keeps its largest piece, so the smallest states stay. `--lakes` takes the lakes up to that rank of Natural Earth (0 the largest alone); there are none without it. `--centre` moves the middle of a box's plane.
 - **Thinned together.** The countries are cut into arcs where a shared border begins and ends, each arc is thinned once and every country is put together again from its arcs (`lib/topology.mjs`), so two neighbours share their border point for point, with no gap and no overlap. Where thinning makes a ring cross itself the arcs there are thinned less, down to not at all; where the data itself crosses, the point that makes it cross is taken out, and `SOURCES.md` counts them.
 - **The land is the countries as one:** the arcs that one country alone runs along are the coast. A box's layers are cut along its edge.
+- **Round another meridian.** `--centre=<lon>` on the whole world turns it round that meridian: the map's edge is the meridian opposite, where the land is parted, and the pieces Natural Earth parts at 180° are made whole again. Without it the world is round 0°, built as it always was, byte for byte.
+- **Across 180°.** A box whose west is east of its east (`--bbox 172,-24,-170,-12`) crosses the 180th meridian: its plane is round the middle of the box, and the land on both sides of the meridian is one. A negative value of an option is given with `=` (`--centre=-150`).
 
 `world.json`, format `world-geo/1`, holds `made` (the options as used) and `frame`, then its layers, an entry a line, in metres on the plane of the frame, x east and y north. Every ring runs counter-clockwise and none crosses itself.
 
@@ -226,6 +230,10 @@ node world.mjs --offline                                                        
 | `countries[]` | `{ id, name, iso?, continent, label, areaKm2, rings }`, the largest first: `id` is Natural Earth's code in lower case (`fra`), `iso` the ISO 3166-1 alpha-3 code where the country has one of its own, `label` a point inside its main land, `rings` its pieces, the largest first. An enclave is a country of its own, painted after the one round it |
 | `boundaries[]` | `{ id, between, lines }`: each land border once, between two countries (`between`, their ids in order; `id` is `a-b`), as lines |
 | `lakes[]` | `{ id, name, ring }`: the lakes asked for, the largest first, painted over the countries |
+| `lanes[]` | `--lanes`: `{ id, rank, name?, lines }`, the sea lanes, the busiest first. See "Sea lanes" |
+| `places[]`, `lines[]` | `--features <file>`: named places `{ id, name, kind, at, lonlat }` and named lines `{ id, name, kind, approximate?, source, lengthKm, lines }`. See "Places and lines" |
+| `heights` | `--heights`: `{ box, cell, cols, rows, values }`, a grid of heights as a city's (`city.relief.grid`): the land above 0, the sea floor below it. See "Heights and shallows" |
+| `shallows[]` | `--shallows 50,200`: `{ id, depth, rings, holes }`, the sea above each depth, the shallowest first |
 
 ```ts
 import { fitView, loadWorld, toFrame, worldFaults, worldOnStage } from 'skink3-geo';
@@ -236,6 +244,48 @@ const map = worldOnStage(view, world);                  // { sea, land, gaps, co
 const fr = map.countries.find((c) => c.id === 'fra')!;  // its rings, and its label on the stage
 const paris = view.project(toFrame(world.frame)([2.35, 48.86]));                      // a place on the map
 worldFaults(world);                                                                  // [] when it keeps to the format
+```
+
+**Sea lanes.** `--lanes` reads the Global Shipping Lane Network of Oak Ridge National Laboratory (public domain): the links of the routes ships took, each with how many of the network's routes used it. A link given both ways is one; links that run on through a point where no other meets, of one rank and name, are one lane. `rank` is how busy it is by tens: 0 none, 1 from 1 to 9 routes, 2 from 10 to 99, and so on; the main routes are 5 and above. A lane follows the routes as the network draws them, straight from junction to junction: a sea lane for a map, not a ship's track. Its ports are not in it: a port is a place (below).
+
+**Places and lines.** `--features <file>` adds what a story names on the map, from a JSON file of `places` and `lines` (`lib/worldlines.mjs`, `checkWorldFeatures`, says what each takes; it refuses what it does not know):
+
+```json
+{
+  "places": [
+    { "id": "harbour", "port": "Suva" },
+    { "id": "field", "airport": "NAN", "name": "Nadi" },
+    { "id": "east", "name": "A point east", "at": [-172, -15] }
+  ],
+  "lines": [
+    { "id": "flight", "name": "A flight", "from": { "great": ["field", "east"] }, "step": 0.5, "source": "The great circle between two places." },
+    { "id": "passage", "name": "A passage", "from": { "through": ["harbour", [179, -19.5], "east"] }, "source": "Drawn after a written account." },
+    { "id": "canal", "name": "A canal", "from": { "osm": ["way/123", "relation/456"] }, "source": "As OpenStreetMap maps it." }
+  ]
+}
+```
+
+- A place is given by hand (`at` with its `name`), or is a port (`port`, by name) or an airport (`airport`, by IATA code or name) of Natural Earth's 1:10m points, public domain, with `near` `[lon, lat]` to choose among several of one name. `at` is on the plane; a box's place may lie beyond its edge, where a route can begin.
+- A line is mapped (`osm`: ways and relations of OpenStreetMap, joined end to end; the map then carries its credit), drawn through places (`through`: ids of the file's places or `[lon, lat]`; marked `approximate`, for a stroke that says so, dashed or faint), or a great circle between two places (`great`, a point every `step` degrees of arc). `lengthKm` is its whole length on the Earth; `lines` its pieces on the map, cut at the edge.
+- `source` is the sentence `SOURCES.md` gives the line, and `world.json` records the file's SHA-256 in `made.features`.
+
+**Heights and shallows.** `--heights` reads ETOPO1, NOAA's global relief model of one arc-minute, coarse and free to use, through NOAA's ERDDAP, a sample every few minutes as the map needs, and resamples it onto the map's plane, a point every `--heights-cell` metres (the box's longer side cut into 600). A box across 180° is read as two parts and joined. `--shallows 50,200` traces the depths given into regions: the ground above each depth, the land with it, under the land, and `holes`, deeper water inside them. A relief of the land alone is `gridOnStage(view, world.heights, { floor: 0 })`: the sea is flat at sea level and the land stands out of it, so a renderer's relief node draws the land alone and the shallows lie under it.
+
+```ts
+const lanes = world.lanes!.filter((l) => l.rank >= 4).flatMap((l) => linesOnStage(view, l.lines));   // the main sea lanes
+const port = world.places!.find((p) => p.id === 'harbour')!;                       // a place on the stage: view.project(port.at)
+const flight = linesOnStage(view, world.lines!.find((l) => l.id === 'flight')!.lines);
+const land = gridOnStage(view, world.heights!, { floor: 0 });                      // a relief of the land, the sea flat
+const shelf = world.shallows!.map((s) => ringsOnStage(view, s.rings));             // under the land, the shallowest last
+```
+
+**Routes.** `routeAlong(lines, from, to, { join?, reach?, frame? })` finds the shortest way along a network of lines (a map's sea lanes, its roads, its rivers): both places are snapped to the nearest point of the lines, and the way between is one polyline through the lines' own points, `{ points, length, ends, off }`. Lines that cross without a shared point do not meet; `join` makes points that close one junction, and joins a line's loose end that close to another line; `reach` refuses a place farther than that from the lines. With `frame`, `length` is metres along the Earth. Places the network does not join are refused, with how near its pieces come. `lineOnStage(view, points)` puts the way on the stage as one polyline, never cut at the edge, so that `cutLine(path, 0, t, { share: true })` draws it on from 0 to 1, a route growing along the lanes; `cutLine(points, from, to)` cuts any line between two lengths. `greatCircle(a, b, { step })` and `arcLength(a, b)` are the shorter way round between two `[lon, lat]` and its length in metres.
+
+```ts
+const network = world.lanes!.filter((l) => l.rank >= 3).flatMap((l) => l.lines);
+const way = routeAlong(network, port.at, other.at, { frame: world.frame, join: 2000 });
+const path = lineOnStage(view, way.points);
+const drawn = cutLine(path, 0, t, { share: true });                                // t from 0 to 1
 ```
 
 `worldOnStage(view, world, { detail?, minArea?, margin? })` fits the map to the stage as the map was built: the countries cut to the view and its margin (120 units) and thinned together again to `detail` (0.3 units), so a border is the same points in both its countries and in its line of `borders`, and an enclave borders the country round it; islands and lakes under `minArea` (2 square units) are left out, but a country keeps its largest piece while it covers anything on the stage (on the whole world 1800 wide, only the Vatican is lost). No outline crosses itself, even where a narrow spit comes closer than the stage's tenths: there a point is taken out of the outline alone, and its border is no longer shared exactly at that spot. Each is the `points` of a flat region: the whole world on a stage 1800 wide takes about 3200 points for its largest land, within the 4000 of a flat region. `ringsOnStage` and `linesOnStage` thin each outline alone, so neighbours drawn with them can part by a hairline, and `ringsOnStage` leaves out a ring that the stage's tenths would make cross itself (the largest lands of the whole world); `ringsInTiles` serves a country larger than a renderer's limit. A project builds its own maps with `runWorld(argv, { root, command })` from `skink3-geo/world.mjs`; a world for a small inset is built with a larger `--detail`.
@@ -283,6 +333,9 @@ Only open data is read. The table of sources is `lib/sources.mjs`; a source come
 | OpenStreetMap | water, streets, land use, a wall check, administrative divisions, named places, features | ODbL | **required**: © OpenStreetMap contributors |
 | Ancient World Mapping Center geodata, at a fixed commit | the coast of the ancient world, where a terrain asks for it | ODbL | **required**, the line in `SOURCES.md` |
 | SRTM | relief, where a spec names an HGT file | public domain | not required |
+| Natural Earth 5.1.2, 1:10m ports and airports | the places of a world map's features | public domain | not required |
+| Global Shipping Lane Network, Oak Ridge National Laboratory, at a fixed commit of a public copy | a world map's sea lanes (`--lanes`) | public domain | not required, the line in `SOURCES.md` |
+| ETOPO1 Global Relief Model (NOAA), through NOAA CoastWatch ERDDAP | a world map's heights and shallows (`--heights`, `--shallows`) | free to use and redistribute | not required, the line in `SOURCES.md` |
 
 - `<city>/SOURCES.md` is written by the build: the credit lines for the description of a film that shows the layers, the source of every layer, and what was drawn by hand from which written source.
 - **Layers made from OpenStreetMap data are a database derived from it**, and the ODbL's share-alike holds for them. The same goes for the geodata of the Ancient World Mapping Center, which is under the ODbL and contains OpenStreetMap data. This repository holds none of either: its example reads Natural Earth, Copernicus and the Global Human Settlement Layer only.
@@ -293,7 +346,7 @@ Only open data is read. The table of sources is `lib/sources.mjs`; a source come
 
 ## The tests
 
-`test/geom.test.ts` holds the plane geometry and the projection; `test/pipeline.test.mjs` the readers (TIFF, BigTIFF, LZW, ZIP), the grids and contours, the hills, the tiles read by the scale, the terrain of an island made in the test, the grids of heights of a relief and a terrain, the built-up outline, walls, epochs, the spec of a new city and the options of a project of its own, all on inputs made in the test; `test/example.test.ts` holds the committed example to the format and to what `map.ts` makes of it on a stage, its terrain in tiles included; `test/stage.test.ts` the shores of water cut by a view, a grid of heights fitted to a stage, the height at a place, a fine grid eased into a coarse one, and the faults of a grid; `test/globe.test.ts` the committed Earth and Moon to their format, rings measured, oriented, made whole and thinned on the sphere, a shapefile made in the test, and globes built from collections made in the test; `test/world.test.ts` the committed world and box to their format, the Equal Earth projection, outlines thinned together, and maps built from collections made in the test; `test/osm-layers.test.mjs` the divisions (a shared border, the cut, the label, the levels, the names, what is refused), the named places, the roads of Natural Earth, their requests, and a build from a cache made in the test, a spec that asks for none of them included; `test/features.test.mjs` the features (a line joined from ways and points, its start, its cut and its stretches below the ground, an area from a closed way, a relation without its hole, points drawn and a cut into pieces, what is refused, the faults they are held to, their requests, and a build from a cache made in the test, a spec without them included); `test/stage.test.ts` also the divisions on a stage and the faults of divisions and places. They download nothing.
+`test/geom.test.ts` holds the plane geometry and the projection; `test/pipeline.test.mjs` the readers (TIFF, BigTIFF, LZW, ZIP), the grids and contours, the hills, the tiles read by the scale, the terrain of an island made in the test, the grids of heights of a relief and a terrain, the built-up outline, walls, epochs, the spec of a new city and the options of a project of its own, all on inputs made in the test; `test/example.test.ts` holds the committed example to the format and to what `map.ts` makes of it on a stage, its terrain in tiles included; `test/stage.test.ts` the shores of water cut by a view, a grid of heights fitted to a stage, the height at a place, a fine grid eased into a coarse one, and the faults of a grid; `test/globe.test.ts` the committed Earth and Moon to their format, rings measured, oriented, made whole and thinned on the sphere, a shapefile made in the test, and globes built from collections made in the test; `test/world.test.ts` the committed world and box to their format, the Equal Earth projection, outlines thinned together, and maps built from collections made in the test; `test/world-layers.test.ts` a world round another meridian, a box across 180°, lanes, places and lines, heights, shallows and a grid read across 180°, their faults, and the options of the command, each also left out; `test/route.test.ts` a route along a network, a line cut, a great circle and a route on the stage; `test/osm-layers.test.mjs` the divisions (a shared border, the cut, the label, the levels, the names, what is refused), the named places, the roads of Natural Earth, their requests, and a build from a cache made in the test, a spec that asks for none of them included; `test/features.test.mjs` the features (a line joined from ways and points, its start, its cut and its stretches below the ground, an area from a closed way, a relation without its hole, points drawn and a cut into pieces, what is refused, the faults they are held to, their requests, and a build from a cache made in the test, a spec without them included); `test/stage.test.ts` also the divisions on a stage and the faults of divisions and places. They download nothing.
 
 ## Rules
 
@@ -312,6 +365,8 @@ Only open data is read. The table of sources is `lib/sources.mjs`; a source come
 - A terrain whose view reaches the open sea does not build `--offline`: the tiles the elevation model lacks there are not in the cache, and only a run online learns that they are missing.
 - Only the GeoJSON files of the Ancient World Mapping Center are read: its open water by sea, one coast for all antiquity. Its shapefiles of the water of single periods are not.
 - Heights are of a surface model: a hill's `height` includes roofs, and a terrain's bands the woods.
+- The sea lanes are a network of the 2000s, straight from junction to junction; a lane is a direction of traffic on a map, not a track. Mapped lines of a world map (`osm`) have run on answers made in the tests only.
+- ETOPO1 is of 2009 and coarse (one arc-minute): a world map's heights are for a soft relief and its shallows for a shelf, not for a figure on screen. Its ERDDAP answers slowly for a large part at a fine stride.
 - Features have run on answers made in the tests only, not yet on a real answer of Overpass. Their years and their stretches below the ground come from the spec: the dates and the tunnel tags of the elements are not read.
 
 ## License
@@ -330,6 +385,8 @@ The code of this repository is under the MIT License: see [`LICENSE`](LICENSE). 
 | [OpenHistoricalMap](https://www.openhistoricalmap.org/copyright) | CC0 1.0 | none |
 | [LROC Global Mare Boundaries](https://lroc.im-ldi.com/about/terms), from the [PDS archive](https://pds.lroc.im-ldi.com/data/LRO-L-LROC-5-RDR-V1.0/LROLRC_2001/EXTRAS/SHAPEFILE/LROC_GLOBAL_MARE/) | public domain: "Data products available through the LROC Data Node of the PDS or through NASA PDS interfaces are in the public domain." | none required; its readme asks the product be cited: Nelson, D. M., et al. (2014), "Mapping lunar maria extents and lobate scarps using LROC image products", Lunar and Planetary Science Conference 45, 2861. LROC asks its images be credited "NASA/GSFC/Arizona State University" |
 | [SRTM](https://www.earthdata.nasa.gov/data/instruments/srtm) | public domain | none |
+| [Global Shipping Lane Network](https://web.archive.org/web/2018/http://cta.ornl.gov/transnet/), Oak Ridge National Laboratory, CTA Transportation Networks | public domain: "These datasets are in the public domain." | none required; `SOURCES.md` names it |
+| [ETOPO1](https://coastwatch.pfeg.noaa.gov/erddap/info/etopo180/index.html), NOAA National Centers for Environmental Information | NOAA's licence on the dataset: the data "may be used and redistributed for free" | none required; `SOURCES.md` names it |
 
 The example city in this repository is made from the first three alone; the example globes from Natural Earth and the LROC mare boundaries.
 

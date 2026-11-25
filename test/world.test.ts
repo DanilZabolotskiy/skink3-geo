@@ -194,7 +194,7 @@ test('buildWorld: a box keeps the countries round it, cut to its edge, on the pl
 
 test('world: what it refuses, and what is wrong with a map is named', async () => {
   assert.throws(() => worldSources(20), /10, 50 or 110/);
-  assert.throws(() => worldFrame({ bbox: [10, 0, 5, 5] }), /west below east/);
+  assert.throws(() => worldFrame({ bbox: [10, 0, 5, 5] }), /is it west and east the wrong way round/);
   assert.throws(() => loadWorld(here('earth/globe.json')), /not world-geo\/1/);
   const base = asLayers(buildWorld(collection(), { scale: 110 }));
   const clockwise = { ...base, countries: base.countries.map((c, k) => (k === 0 ? { ...c, rings: [[...c.rings[0]!].reverse()] } : c)) };

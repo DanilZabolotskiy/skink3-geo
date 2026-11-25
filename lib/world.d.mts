@@ -12,12 +12,29 @@ export interface WorldMade {
   centre?: LonLat | null;
 }
 
+export interface WorldFrameOf {
+  projection: 'equal-earth' | 'laea';
+  centre: LonLat;
+  box: Box;
+  lonlat: Box;
+  outline?: Point[];
+}
+
 export function worldSources(scale: number, lakes?: boolean): { countries: string; lakes?: string };
 export function worldFrame(o?: { bbox?: Box | null; centre?: LonLat | null }): {
   proj: Projection;
   frame: { projection: 'equal-earth' | 'laea'; centre: LonLat; box: Box; lonlat: Box };
   outline: Point[] | null;
 };
+export function frameOptions(frame: WorldFrameOf): { bbox?: Box; centre?: LonLat };
+export function frameCut(frame: WorldFrameOf): {
+  forward: (p: readonly number[]) => Point;
+  rings: (ring: readonly LonLat[]) => LonLat[][];
+  lines: (line: readonly LonLat[]) => LonLat[][];
+  seam?: number;
+};
+export function stitchSeam(rings: readonly LonLat[][], seam: number, tol?: number): LonLat[][];
+export function nearFrame(frame: WorldFrameOf, margin: number): (box: Box) => boolean;
 export function buildWorld(
   data: { countries: FeatureCollection; lakes?: FeatureCollection | null },
   made: WorldMade,
