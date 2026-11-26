@@ -15,8 +15,9 @@
 //
 // A round body for a globe (globe.mjs) is read the same way: `loadGlobe`, in degrees, for a renderer's own sphere.
 // A flat map of the world or of the countries of a box (world.mjs) is read with `loadWorld`, in metres on its frame's
-// plane, and put on the stage with `worldOnStage`, through the same views. A route along a map's lines (its sea lanes,
-// say) is `routeAlong`, put on the stage whole with `lineOnStage` and drawn on in stretches with `cutLine`.
+// plane, and put on the stage with `worldOnStage`, through the same views (its first-level divisions with it), and its
+// water risk with `waterRiskOnStage`. A route along a map's lines (its sea lanes, say) is `routeAlong`, put on the
+// stage whole with `lineOnStage` and drawn on in stretches with `cutLine`.
 //
 // This file draws nothing and names no colour: what a layer looks like is the scene's.
 
@@ -498,6 +499,66 @@ export interface WorldShallows {
   holes: Ring[];
 }
 
+/** A first-level division of a country of a world map (a state, a province), from Natural Earth's 1:10m admin-1. */
+export interface WorldDivision {
+  /** Its ISO 3166-2 code in lower case (`de-by` for `DE-BY`) where it has one of its own, else Natural Earth's code (`deu-1591`). */
+  id: string;
+  /** Its name in English, as Natural Earth gives it. */
+  name: string;
+  /** Its ISO 3166-2 code (`DE-BY`), where Natural Earth gives one. */
+  code?: string;
+  /** The id of its country, as the map's countries have it (`deu`). */
+  country: string;
+  /** What its country calls it, in English: `State`, `Province`. */
+  kind?: string;
+  /** The region it belongs to, where its country groups its divisions so. */
+  region?: string;
+  /** Where its name may stand: a point inside its main piece, on the plane. */
+  label: Point;
+  /** Its area on the map, in km² (a box's division is the part inside the box). */
+  areaKm2: number;
+  /** Its pieces, counter-clockwise, the largest first. One inside another division is a division of its own, painted after it. */
+  rings: Ring[];
+}
+
+/** A river of a world map: Natural Earth's centerlines of one name, joined where they meet. */
+export interface WorldRiver {
+  id: string;
+  /** Its name in English where Natural Earth gives one, else as it writes it. A river it names otherwise along its course comes once a name. */
+  name: string;
+  /** Natural Earth's scalerank: 0 for the largest rivers, higher for smaller. */
+  rank: number;
+  /** Its pieces on the map, cut at its edge; a stretch through a lake runs on through it, to be painted under the lake. */
+  lines: Line[];
+}
+
+/** A town of a world map: a populated place of Natural Earth, with its people. */
+export interface WorldTown {
+  id: string;
+  name: string;
+  /** The id of its country, as the map's countries have it (`fra`). */
+  country: string;
+  /** Its people: Natural Earth's greatest population for it (`pop_max`, the town with its agglomeration). */
+  pop: number;
+  /** The capital of a country. */
+  capital?: true;
+  /** Where it stands on the plane, and in degrees. */
+  at: Point;
+  lonlat: LonLat;
+}
+
+/** A category of an indicator of water risk (WRI's Aqueduct): its pieces as one. */
+export interface WorldRiskClass {
+  /** Aqueduct's category: -1 (arid and of low water use), 0 (low) to 4 (extremely high); -9999 where there is no data. */
+  cat: number;
+  /** Aqueduct's label of the category, as `Extremely High (>80%)`. */
+  label: string;
+  /** Its outlines, counter-clockwise, the largest first. */
+  rings: Ring[];
+  /** The other categories inside them, counter-clockwise too: what is not of this category. */
+  holes: Ring[];
+}
+
 /**
  * world.json as it is written by world.mjs: a flat map of the whole world, or of the countries of a box, in metres on
  * the plane of its frame, x east and y north. Every ring runs counter-clockwise, and no ring crosses itself. The
@@ -527,6 +588,10 @@ export interface WorldLayers {
     lanes?: true;
     features?: { file: string; sha256: string };
     heights?: { cell: number; stride: number; shallows?: number[] };
+    divisions?: string[];
+    rivers?: { rank: number | null; names: string[] };
+    towns?: number;
+    waterRisk?: string;
   };
   frame: WorldFrame;
   /** All the land, the countries as one, the largest first. */
@@ -548,6 +613,16 @@ export interface WorldLayers {
   heights?: HeightGrid;
   /** The shallows, the shallowest first (built with --shallows). */
   shallows?: WorldShallows[];
+  /** The first-level divisions of the countries asked for (built with --divisions), country by country as `countries` come, in a country the largest first. */
+  divisions?: WorldDivision[];
+  /** Each border between two divisions of one country once, `a-b` by their ids in order; a border of two countries is in `boundaries`. */
+  divisionBorders?: { id: string; between: [string, string]; lines: Line[] }[];
+  /** The rivers asked for (built with --rivers), the largest rank first. */
+  rivers?: WorldRiver[];
+  /** The towns of at least the people asked for (built with --towns), the largest first. */
+  towns?: WorldTown[];
+  /** An indicator of WRI's Aqueduct 4.0 by category (built with --water-risk); its credit is required. */
+  waterRisk?: { indicator: string; classes: WorldRiskClass[] };
 }
 
 /** A world map, read from world.json: a path, or a URL made from `import.meta.url`. */
@@ -658,6 +733,58 @@ export function worldFaults(w: WorldLayers): string[] {
       if (k > 0 && !(sh.depth > w.shallows[k - 1]!.depth)) out.push(`shallows.${sh.id}: not deeper than the shallows before it`);
       for (const [j, r] of sh.rings.entries()) ring(`shallows.${sh.id}.${j}`, r);
       for (const [j, r] of sh.holes.entries()) ring(`shallows.${sh.id}.holes.${j}`, r);
+    }
+  }
+  if (w.divisions) {
+    unique('divisions', w.divisions);
+    const order = new Map(w.countries.map((c, k) => [c.id, k]));
+    for (const [k, d] of w.divisions.entries()) {
+      if (!order.has(d.country)) out.push(`divisions.${d.id}: of a country the map does not hold (${d.country})`);
+      const before = w.divisions[k - 1];
+      if (before && (order.get(before.country) ?? 0) > (order.get(d.country) ?? 0)) out.push(`divisions.${d.id}: its country comes before the country of the division before it`);
+      else if (before && before.country === d.country && d.areaKm2 > before.areaKm2) out.push(`divisions.${d.id}: larger than the division before it`);
+      if (d.rings.length === 0) out.push(`divisions.${d.id}: no rings`);
+      for (const [j, r] of d.rings.entries()) {
+        ring(`divisions.${d.id}.${j}`, r);
+        if (j > 0 && area(r) > area(d.rings[j - 1]!)) out.push(`divisions.${d.id}.${j}: larger than the ring before it`);
+      }
+      if (!d.label.every(Number.isFinite)) out.push(`divisions.${d.id}: no label`);
+    }
+    const ids = new Map(w.divisions.map((d) => [d.id, d.country]));
+    for (const b of w.divisionBorders ?? []) {
+      const [p, q] = b.between;
+      if (!(p < q) || b.id !== `${p}-${q}`) out.push(`divisionBorders.${b.id}: not the ids of its divisions in order`);
+      if (!ids.has(p) || !ids.has(q)) out.push(`divisionBorders.${b.id}: between divisions the map does not hold`);
+      else if (ids.get(p) !== ids.get(q)) out.push(`divisionBorders.${b.id}: between divisions of two countries, whose border is theirs`);
+      lines(`divisionBorders.${b.id}`, b.lines);
+    }
+  } else if (w.divisionBorders) out.push('divisionBorders: borders of divisions the map does not hold');
+  if (w.rivers) {
+    unique('rivers', w.rivers);
+    for (const [k, r] of w.rivers.entries()) {
+      if (!(Number.isInteger(r.rank) && r.rank >= 0)) out.push(`rivers.${r.id}: its rank is not a whole number of 0 or more`);
+      if (k > 0 && r.rank < w.rivers[k - 1]!.rank) out.push(`rivers.${r.id}: of a lower rank than the river before it`);
+      lines(`rivers.${r.id}`, r.lines);
+    }
+  }
+  if (w.towns) {
+    unique('towns', w.towns);
+    for (const [k, t] of w.towns.entries()) {
+      if (!(Number.isInteger(t.pop) && t.pop >= 0)) out.push(`towns.${t.id}: no people`);
+      if (k > 0 && t.pop > w.towns[k - 1]!.pop) out.push(`towns.${t.id}: larger than the town before it`);
+      if (!inBox([t.at])) out.push(`towns.${t.id}: outside the frame's box`);
+      if (!(Math.abs(t.lonlat[0]) <= 180 && Math.abs(t.lonlat[1]) <= 90)) out.push(`towns.${t.id}: not a place on the Earth`);
+    }
+  }
+  if (w.waterRisk) {
+    const seen = new Set<number>();
+    for (const c of w.waterRisk.classes) {
+      if (seen.has(c.cat)) out.push(`waterRisk.${c.cat}: twice`);
+      seen.add(c.cat);
+      if (!Number.isInteger(c.cat)) out.push(`waterRisk.${c.cat}: not a category`);
+      if (c.rings.length === 0) out.push(`waterRisk.${c.cat}: no rings`);
+      for (const [j, r] of c.rings.entries()) ring(`waterRisk.${c.cat}.${j}`, r);
+      for (const [j, r] of c.holes.entries()) ring(`waterRisk.${c.cat}.holes.${j}`, r);
     }
   }
   return out;
@@ -1028,6 +1155,10 @@ export interface WorldOnStage {
   /** Each land border once, every one the view holds, an enclave's too. */
   borders: { id: string; between: [string, string]; lines: Point[][] }[];
   lakes: { id: string; name: string; rings: Point[][] }[];
+  /** A map with divisions alone: those the view holds, in the map's order, each sharing its outer edge with its country point for point. */
+  divisions?: { id: string; name: string; code?: string; country: string; label: Point; rings: Point[][] }[];
+  /** A map with divisions alone: each border between two divisions of one country once, every one the view holds. */
+  divisionBorders?: { id: string; between: [string, string]; lines: Point[][] }[];
 }
 
 /**
@@ -1048,17 +1179,27 @@ export function worldOnStage(view: View, world: WorldLayers, o: WorldStageOption
   const [ax, ay] = view.project([cx, cy]);
   const raw = (p: readonly number[]): Point => [ax + (p[0]! - cx) * view.scale, ay - (p[1]! - cy) * view.scale];
   const cut = (ring: Ring): Point[][] => clipRing(ring, box).map((piece) => piece.map(raw));
-  // An enclave is a hole in the country round it: so their border is found, and the land does not count it twice.
-  const holes = world.countries.map((): Ring[] => []);
-  for (const c of world.countries) {
-    if (c.rings.length !== 1 || !pointInRing(c.label, c.rings[0]!)) continue;
-    const round = world.countries.findIndex((d) => d !== c && d.areaKm2 > c.areaKm2 && d.rings.some((r) => pointInRing(c.label, r)));
-    if (round >= 0) holes[round]!.push(c.rings[0]!);
-  }
-  const shapes = world.countries.map((c, k) => ({
-    rings: [...c.rings.flatMap((r) => cut(r).map((points) => ({ points }))), ...holes[k]!.flatMap((r) => cut(r).map((points) => ({ points, hole: true })))],
-  }));
-  const t = thinTogether(shapes, { tol: detail, minArea, digits: 1 });
+  // An enclave is a hole in the country round it: so their border is found, and the land does not count it twice. The
+  // same holds for a division inside another division.
+  const enclaves = (list: readonly { label: Point; areaKm2: number; rings: Ring[] }[]): Ring[][] => {
+    const holes = list.map((): Ring[] => []);
+    for (const c of list) {
+      if (c.rings.length !== 1 || !pointInRing(c.label, c.rings[0]!)) continue;
+      const round = list.findIndex((d) => d !== c && d.areaKm2 > c.areaKm2 && d.rings.some((r) => pointInRing(c.label, r)));
+      if (round >= 0) holes[round]!.push(c.rings[0]!);
+    }
+    return holes;
+  };
+  const shapesOf = (list: readonly { label: Point; areaKm2: number; rings: Ring[] }[], level: 0 | 1): { rings: { points: Point[]; hole?: true }[]; level?: 1 }[] => {
+    const holes = enclaves(list);
+    return list.map((c, k) => ({
+      rings: [...c.rings.flatMap((r) => cut(r).map((points) => ({ points }))), ...holes[k]!.flatMap((r) => cut(r).map((points) => ({ points, hole: true as const })))],
+      ...(level === 1 ? { level: 1 as const } : {}),
+    }));
+  };
+  // The divisions lie over their countries, thinned with them: a division keeps its outer edge with its country.
+  const divisions = world.divisions ?? [];
+  const t = thinTogether([...shapesOf(world.countries, 0), ...(world.divisions ? shapesOf(divisions, 1) : [])], { tol: detail, minArea, digits: 1 });
   // On a small stage a few outlines still touch themselves in the stage's tenths: points are taken out of those alone.
   const whole = (rings: Point[][]): Point[][] => rings.map((r) => (crosses(r, true) ? untangle(r) : r)).filter((r): r is Point[] => r !== null && r.length >= 3 && area(r) > 0);
   const countries = world.countries
@@ -1073,7 +1214,63 @@ export function worldOnStage(view: View, world: WorldLayers, o: WorldStageOption
   const water = thinTogether(world.lakes.map((l) => ({ rings: cut(l.ring).map((points) => ({ points })) })), { tol: detail, digits: 1 });
   const lakes = world.lakes.map((l, k) => ({ id: l.id, name: l.name, rings: whole(water.shapes[k]!.rings).filter((r) => area(r) >= minArea) })).filter((l) => l.rings.length > 0);
   const sea = world.frame.outline ? cut(world.frame.outline).map((r) => dedupe(simplify(r, detail, true).map(([x, y]) => [tenth(x), tenth(y)] as Point), 0, true)) : [];
-  return { sea, land: whole(t.land).filter((r) => area(r) >= minArea), gaps: whole(t.gaps.map((r) => orient(r, true))).filter((r) => area(r) >= minArea), countries, borders, lakes };
+  const out: WorldOnStage = { sea, land: whole(t.land).filter((r) => area(r) >= minArea), gaps: whole(t.gaps.map((r) => orient(r, true))).filter((r) => area(r) >= minArea), countries, borders, lakes };
+  if (!world.divisions) return out;
+  const n = world.countries.length;
+  out.divisions = divisions
+    .map((d, j) => ({ id: d.id, name: d.name, ...(d.code ? { code: d.code } : {}), country: d.country, label: view.project(d.label), rings: whole(t.shapes[n + j]!.rings) }))
+    .filter((d) => d.rings.length > 0);
+  out.divisionBorders = (t.inner?.borders ?? [])
+    .filter((b) => divisions[b.a - n]!.country === divisions[b.b - n]!.country)
+    .map((b) => {
+      const [p, q] = [divisions[b.a - n]!.id, divisions[b.b - n]!.id].sort() as [string, string];
+      return { id: `${p}-${q}`, between: [p, q] as [string, string], lines: b.lines };
+    })
+    .sort((a, b) => (a.id < b.id ? -1 : 1));
+  return out;
+}
+
+/** A category of water risk on the stage, as `waterRiskOnStage` gives it. */
+export interface RiskClassOnStage {
+  cat: number;
+  label: string;
+  /** Its outlines on the stage, the largest first. */
+  rings: Point[][];
+  /** The other categories inside them, wound against `rings`: a fill by winding of the two lists together cuts them out. */
+  holes: Point[][];
+}
+
+/**
+ * A world map's water risk (built with --water-risk) on the stage: its categories cut to the view and its margin and
+ * thinned together again, so two categories share their border point for point. Each category is `rings` less its
+ * `holes`: painted as one shape that fills by winding (`fillRings({ rings: [...c.rings, ...c.holes] })` of the
+ * engine), its holes cut out; or every ring of every category painted as a flat region, the largest first, so the
+ * categories inside a hole are painted over it. Categories smaller than `minArea` on the stage are left out.
+ */
+export function waterRiskOnStage(view: View, world: WorldLayers, o: WorldStageOptions = {}): RiskClassOnStage[] {
+  if (!world.waterRisk) throw new Error('waterRiskOnStage: the map has no water risk (build it with --water-risk)');
+  const detail = o.detail ?? 0.3;
+  const minArea = o.minArea ?? 2;
+  if (!(detail > 0)) throw new Error(`waterRiskOnStage: detail must be above 0, got ${detail}`);
+  const box = grown(view, o.margin ?? 120);
+  const [cx, cy] = [(view.box[0] + view.box[2]) / 2, (view.box[1] + view.box[3]) / 2];
+  const [ax, ay] = view.project([cx, cy]);
+  const raw = (p: readonly number[]): Point => [ax + (p[0]! - cx) * view.scale, ay - (p[1]! - cy) * view.scale];
+  const cut = (ring: Ring): Point[][] => clipRing(ring, box).map((piece) => piece.map(raw));
+  const classes = world.waterRisk.classes;
+  const t = thinTogether(
+    classes.map((c, k) => ({ rings: [...c.rings.flatMap((r) => cut(r).map((points) => ({ points }))), ...c.holes.flatMap((r) => cut(r).map((points) => ({ points, hole: true })))], group: k })),
+    { tol: detail, minArea, digits: 1 },
+  );
+  const whole = (rings: Point[][]): Point[][] => rings.map((r) => (crosses(r, true) ? untangle(r) : r)).filter((r): r is Point[] => r !== null && r.length >= 3 && area(r) >= minArea);
+  return (t.groups ?? [])
+    .map((g) => {
+      const c = classes[g.key as number]!;
+      const rings = whole(g.land);
+      // On the stage y runs down: the rings are wound one way, the holes, as the topology gives them, the other.
+      return { cat: c.cat, label: c.label, rings, holes: whole(g.gaps) };
+    })
+    .filter((c) => c.rings.length > 0);
 }
 
 export interface DivisionsOnStage {

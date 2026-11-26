@@ -15,7 +15,14 @@ export interface Thinned {
   /** The border between shapes a and b (a < b): open lines, or a closed ring with its first point repeated at its end. */
   borders: { a: number; b: number; lines: Point[][] }[];
   stats: { arcs: number; shared: number; crossing: number; open: number; mended: number };
+  /** Only with shapes of level 1: the borders between two of them. */
+  inner?: { borders: { a: number; b: number; lines: Point[][] }[] };
+  /** Only with shapes in groups: each group's shapes as one, in the order the keys first come. */
+  groups?: { key: string | number; land: Point[][]; gaps: Point[][] }[];
 }
 
-export function thinTogether(shapes: readonly { rings: readonly { points: readonly Point[]; hole?: boolean }[] }[], o: { tol: number; minArea?: number; digits?: number }): Thinned;
+export function thinTogether(
+  shapes: readonly { rings: readonly { points: readonly Point[]; hole?: boolean }[]; level?: 0 | 1; group?: string | number }[],
+  o: { tol: number; minArea?: number; digits?: number },
+): Thinned;
 export function untangle(points: readonly Point[]): Point[] | null;

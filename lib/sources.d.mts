@@ -34,3 +34,6 @@ export const SHIPPING_LANES_COMMIT: string;
 export function shippingLanes(o: Fetch): Promise<Download>;
 export function etopoRequest(box: Box, stride: number): { query: string; url: string };
 export function etopo(o: Fetch & { box: Box; stride: number; part?: number }): Promise<Download>;
+export function creditOf(row: Licence, key: string, lock?: readonly { source: string; retrieved?: string }[]): string;
+export const AQUEDUCT: { id: string; url: string; request: string; dataDate: string; table: string };
+export function aqueduct(o: Fetch): Promise<Download>;

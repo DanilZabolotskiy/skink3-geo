@@ -5,13 +5,31 @@ export function worldSourcesText(
   world: {
     name: string;
     frame: { projection: string };
-    made: { scale: number; detail: number; minArea: number; lakes: number | null; bbox?: number[]; centre?: number[]; lanes?: boolean; features?: { file: string; sha256: string }; heights?: { cell: number; stride: number; shallows?: number[] } };
+    made: {
+      scale: number;
+      detail: number;
+      minArea: number;
+      lakes: number | null;
+      bbox?: number[];
+      centre?: number[];
+      lanes?: boolean;
+      features?: { file: string; sha256: string };
+      heights?: { cell: number; stride: number; shallows?: number[] };
+      divisions?: string[];
+      rivers?: { rank: number | null; names: string[] };
+      towns?: number;
+      waterRisk?: string;
+    };
     stats: { mended: number };
     lanes?: readonly object[];
     places?: readonly { id: string; name: string; kind: string; lonlat: number[] }[];
     lines?: readonly { id: string; name: string; kind: string; approximate?: boolean; source: string; lengthKm: number }[];
     heights?: object;
     shallows?: readonly { id: string; depth: number }[];
+    divisions?: readonly object[];
+    rivers?: readonly object[];
+    towns?: readonly object[];
+    waterRisk?: { indicator: string; classes: readonly { cat: number; label: string }[] };
   },
   lock: readonly { id: string; source: string; bytes: number; sha256: string; dataDate?: string }[],
   o?: { command?: string },

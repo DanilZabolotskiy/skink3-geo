@@ -15,6 +15,14 @@
 //   --heights           the heights of the land and the depths of the sea as a grid (ETOPO1, NOAA)
 //   --heights-cell <m>  the metres between the points of that grid (the box's longer side cut into 600)
 //   --shallows <m,...>  the sea above these depths as regions (--shallows 50,200)
+//   --divisions <ids>   the first-level divisions (states, provinces) of these countries, by the countries' ids
+//                       (--divisions deu,aus), or of every country of the map (all): Natural Earth's 1:10m admin-1,
+//                       thinned with the countries; at --scale 10 alone
+//   --rivers <list>     the rivers of Natural Earth's centerlines: a rank, those of its scalerank and below (--rivers 4),
+//                       and names (--rivers Danube,Rhine), or both
+//   --towns <people>    the towns of Natural Earth's populated places with at least that many people, as points
+//   --water-risk <ind>  an indicator of WRI's Aqueduct 4.0 by category, as regions (--water-risk bws: baseline water
+//                       stress); its credit is required
 //   --offline           from the cache alone: nothing is fetched
 //   --update            takes downloads that differ from the lock
 //
@@ -38,8 +46,9 @@ import { parseArgs } from 'node:util';
 import { overpass, sha256 } from './lib/fetch.mjs';
 import { elementLines } from './lib/layers.mjs';
 import { overpassDate, readOverpass } from './lib/osm.mjs';
-import { etopo, etopoRequest, licencesWith, NATURAL_EARTH_VERSION, naturalEarth, SHIPPING_LANES_COMMIT, shippingLanes } from './lib/sources.mjs';
+import { AQUEDUCT, aqueduct, creditOf, etopo, etopoRequest, licencesWith, NATURAL_EARTH_VERSION, naturalEarth, SHIPPING_LANES_COMMIT, shippingLanes } from './lib/sources.mjs';
 import { buildWorld, worldSources } from './lib/world.mjs';
+import { buildRivers, buildTowns, buildWaterRisk, readWaterRisk, riverPicks } from './lib/worldthemes.mjs';
 import { buildHeights, heightsPlan, joinGrids, readEsriAscii } from './lib/worldheights.mjs';
 import { buildLanes, buildWorldFeatures, checkWorldFeatures } from './lib/worldlines.mjs';
 
@@ -56,7 +65,7 @@ export function worldText(world) {
 
 /** SOURCES.md of a world build. */
 export function worldSourcesText(world, lock, { command = 'world.mjs', licences = licencesWith() } = {}) {
-  const used = [...new Set(lock.map((d) => d.source))].map((key) => licences[key]);
+  const used = [...new Set(lock.map((d) => d.source))].map((key) => ({ ...licences[key], credit: creditOf(licences[key], key, lock) }));
   const m = world.made;
   const scale = `Natural Earth ${NATURAL_EARTH_VERSION}, 1:${m.scale}m`;
   const frame = world.frame.projection === 'equal-earth' ? `the whole world on the Equal Earth projection${m.centre ? `, centred on the meridian ${m.centre[0]}°` : ''}` : `the box ${m.bbox.join(', ')} on the azimuthal equal-area plane round ${m.centre.join(', ')}`;
@@ -95,6 +104,10 @@ export function worldSourcesText(world, lock, { command = 'world.mjs', licences 
     ...(world.lines ?? []).map((l) => `| \`lines\`: \`${l.id}\` | ${l.kind === 'mapped' ? 'OpenStreetMap' : l.kind === 'great' ? 'the great circle between two places' : 'drawn through places by hand'} | ${l.name}${l.approximate ? ' (approximate)' : ''}, ${l.lengthKm} km: ${l.source} |`),
     ...(world.heights ? [`| \`heights\` | ${licences.etopo.name} | a sample every ${m.heights.stride} arc-minutes, read between samples onto a point every ${m.heights.cell} m of the plane; metres above the sea (the sea floor below 0) |`] : []),
     ...(world.shallows ?? []).map((sh) => `| \`shallows\`: \`${sh.id}\` | ${licences.etopo.name} | the ground above ${sh.depth} m below the sea, the contour of the heights there, thinned to ${m.detail} m |`),
+    ...(world.divisions ? [`| \`divisions\`, \`divisionBorders\` | Natural Earth ${NATURAL_EARTH_VERSION}, 1:10m admin-1 states and provinces | the first-level divisions of ${m.divisions.join(', ')}, thinned together with the countries, so a division keeps one border with its neighbour and its outer edge with its country${cut}; ${world.divisions.length} divisions |`] : []),
+    ...(world.rivers ? [`| \`rivers\` | Natural Earth ${NATURAL_EARTH_VERSION}, 1:${m.scale}m rivers and lake centerlines | ${[m.rivers.rank === null ? '' : `the rivers of rank ${m.rivers.rank} and below`, m.rivers.names.length > 0 ? `by name: ${m.rivers.names.join(', ')}` : ''].filter((t) => t).join('; ')}; the pieces of a river joined, thinned to ${m.detail} m${cut}; ${world.rivers.length} rivers |`] : []),
+    ...(world.towns ? [`| \`towns\` | Natural Earth ${NATURAL_EARTH_VERSION}, 1:10m populated places | the towns of at least ${m.towns} people (their greatest population), the largest first; ${world.towns.length} towns |`] : []),
+    ...(world.waterRisk ? [`| \`waterRisk\` | ${licences.aqueduct.name} | the indicator \`${world.waterRisk.indicator}\` by category: its pieces thinned together to ${m.detail} m and each category's made one${cut}; ${world.waterRisk.classes.map((c) => `${c.cat} ${c.label}`).join('; ')} |`] : []),
     '',
     '## The downloads',
     '',
@@ -126,6 +139,7 @@ export async function runWorld(argv, { root = process.cwd(), command = 'world.mj
       map: { type: 'string' }, name: { type: 'string' }, root: { type: 'string' }, cache: { type: 'string' }, offline: { type: 'boolean' }, update: { type: 'boolean' }, preview: { type: 'boolean' },
       scale: { type: 'string' }, bbox: { type: 'string' }, centre: { type: 'string' }, detail: { type: 'string' }, 'min-area': { type: 'string' }, lakes: { type: 'string' },
       lanes: { type: 'boolean' }, features: { type: 'string' }, heights: { type: 'boolean' }, 'heights-cell': { type: 'string' }, shallows: { type: 'string' },
+      divisions: { type: 'string' }, rivers: { type: 'string' }, towns: { type: 'string' }, 'water-risk': { type: 'string' },
     },
   });
   const bbox = values.bbox === undefined ? null : numbers(values.bbox, 4, '--bbox');
@@ -146,7 +160,18 @@ export async function runWorld(argv, { root = process.cwd(), command = 'world.mj
     lakes: values.lakes === undefined ? null : number(values.lakes, '--lakes', 0, 12),
     ...(bbox ? { bbox, centre } : centre ? { centre } : {}),
   };
-  const names = worldSources(scale, made.lakes != null);
+  // The first-level divisions of the countries named by their ids, or of all.
+  if (values.divisions !== undefined) {
+    const ids = String(values.divisions).split(',').map((v) => v.trim()).filter((v) => v !== '');
+    if (ids.length === 0 || !ids.every((id) => id === 'all' || /^[a-z][a-z0-9]{2}$/.test(id))) throw new Error(`world: --divisions takes the ids of countries as the map has them (deu, fra), separated by commas, or all; got ${JSON.stringify(values.divisions)}`);
+    if (ids.includes('all') && ids.length > 1) throw new Error('world: --divisions all takes every country of the map; name no others with it');
+    made.divisions = ids;
+  }
+  const names = worldSources(scale, made.lakes != null, made.divisions !== undefined);
+  const rivers = values.rivers === undefined ? null : riverPicks(values.rivers);
+  const towns = values.towns === undefined ? null : number(values.towns, '--towns', 0, 1e9);
+  const waterRisk = values['water-risk'] === undefined ? null : String(values['water-risk']);
+  if (waterRisk !== null && !/^[a-z][a-z0-9_]*$/.test(waterRisk)) throw new Error(`world: --water-risk names an indicator of Aqueduct in small letters (bws), got ${JSON.stringify(waterRisk)}`);
   const home = resolve(values.root ?? root);
   // What the map holds beyond its countries: each asked for by an option of its own, none by default.
   let features = null;
@@ -183,7 +208,7 @@ export async function runWorld(argv, { root = process.cwd(), command = 'world.mj
     return JSON.parse(readFileSync(note(name, 'natural-earth', `natural-earth ${NATURAL_EARTH_VERSION} ${name}.geojson`, got, NATURAL_EARTH_VERSION), 'utf8'));
   };
   log(`world: ${bbox ? `the countries of ${bbox.join(', ')}` : 'the whole world'}, from Natural Earth 1:${scale}m`);
-  const built = buildWorld({ countries: await ne(names.countries), lakes: names.lakes ? await ne(names.lakes) : null }, made);
+  const built = buildWorld({ countries: await ne(names.countries), lakes: names.lakes ? await ne(names.lakes) : null, divisions: names.divisions ? await ne(names.divisions) : null }, made);
   const { stats, ...layers } = built;
   const extra = {};
   if (values.lanes) {
@@ -225,7 +250,23 @@ export async function runWorld(argv, { root = process.cwd(), command = 'world.mj
     if (values.heights) extra.heights = h.heights;
     if (shallows.length > 0) extra.shallows = h.shallows;
   }
-  for (const key of ['lanes', 'features', 'heights']) if (made[key] !== undefined) layers.made[key] = made[key];
+  if (rivers) {
+    made.rivers = rivers;
+    extra.rivers = buildRivers(await ne(`ne_${scale}m_rivers_lake_centerlines`), layers.frame, { detail: layers.made.detail, ...rivers });
+  }
+  if (towns !== null) {
+    made.towns = towns;
+    extra.towns = buildTowns(await ne('ne_10m_populated_places_simple'), layers.frame, { minPop: towns });
+  }
+  if (waterRisk !== null) {
+    const got = await aqueduct({ cache, offline: values.offline ?? false, log });
+    const path = note(AQUEDUCT.id, 'aqueduct', AQUEDUCT.request, got, AQUEDUCT.dataDate);
+    log(`  water risk: reading the table ${AQUEDUCT.table} of the archive`);
+    const rows = readWaterRisk(readFileSync(path), { indicator: waterRisk, frame: layers.frame, table: AQUEDUCT.table });
+    made.waterRisk = waterRisk;
+    extra.waterRisk = buildWaterRisk(rows, layers.frame, { detail: layers.made.detail, minArea: layers.made.minArea * 1e6, indicator: waterRisk });
+  }
+  for (const key of ['lanes', 'features', 'heights', 'rivers', 'towns', 'waterRisk']) if (made[key] !== undefined) layers.made[key] = made[key];
   const world = { format: 'world-geo/1', id: map, name: values.name ?? (bbox ? map : 'The world'), units: UNITS, ...layers, ...extra };
   const count = (rings) => `${rings.length} (${rings.reduce((n, r) => n + r.length, 0)} points)`;
   log(`  countries ${world.countries.length}, ${count(world.countries.flatMap((c) => c.rings))}; land ${count(world.land.map((l) => l.ring))}; gaps ${world.gaps.length}; boundaries ${world.boundaries.length}; lakes ${world.lakes.length}`);
@@ -233,6 +274,10 @@ export async function runWorld(argv, { root = process.cwd(), command = 'world.mj
   if (world.places || world.lines) log(`  places ${world.places.length}; lines ${world.lines.map((l) => `${l.id} ${l.lengthKm} km`).join(', ') || 0}`);
   if (world.heights) log(`  heights ${world.heights.cols} by ${world.heights.rows}, a point every ${world.heights.cell} m`);
   if (world.shallows) log(`  shallows ${world.shallows.map((sh) => `${sh.depth} m: ${sh.rings.length} rings`).join('; ')}`);
+  if (world.divisions) log(`  divisions ${world.divisions.length}, ${count(world.divisions.flatMap((d) => d.rings))}; their borders ${world.divisionBorders.length}`);
+  if (world.rivers) log(`  rivers ${world.rivers.length}: ${world.rivers.slice(0, 12).map((r) => r.name).join(', ')}${world.rivers.length > 12 ? ', ...' : ''}`);
+  if (world.towns) log(`  towns ${world.towns.length}`);
+  if (world.waterRisk) log(`  water risk (${world.waterRisk.indicator}): ${world.waterRisk.classes.map((c) => `${c.cat} ${count(c.rings)}`).join('; ')}`);
   if (stats.crossing > 0 || stats.open > 0) log(`  note: ${stats.crossing} ring(s) still cross themselves, ${stats.open} stretch(es) of coast do not close: the data has a fault there`);
   mkdirSync(outDir, { recursive: true });
   writeFileSync(join(outDir, 'world.json'), worldText(world));
