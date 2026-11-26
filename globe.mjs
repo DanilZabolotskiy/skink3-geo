@@ -7,6 +7,12 @@
 //   --update         takes downloads that differ from the lock
 //   --tolerance <deg> --min-area <km2>                                          the thinning, and what is too small to keep
 //   --lake-area <km2> --ice-area <km2> --min-pop <n>                            the same for the Earth's lakes, ice and towns
+//   --seafloor-age <my,...>  the Earth's ocean floor in bands of age between these ages, millions of years
+//                            (--seafloor-age 20,40,60,80,100,140): EarthByte's age grid; its credit is required
+//   --depths <m,...>         the Earth's sea in bands of depth between these depths, metres (--depths 200,2000,4000,6000):
+//                            ETOPO1
+//   --seafloor-cell <deg>    the cells the sea floor is traced on, degrees that divide 90 (0.5); a polygon of it smaller
+//                            than two cells at the equator, or than --min-area, is left out
 //
 // It writes, into <root>/<body>/ (lib/globe.mjs says how the layers are made):
 //   globe.json          the layers, in degrees [lon, lat] (README.md, "A globe")
@@ -25,7 +31,9 @@ import { parseArgs } from 'node:util';
 import { download } from './lib/fetch.mjs';
 import { BODIES, buildEarth, buildMoon, earthSources, GLOBE_DEFAULTS, MOON_MARIA } from './lib/globe.mjs';
 import { readShapefile } from './lib/shapefile.mjs';
-import { licencesWith, NATURAL_EARTH_VERSION, naturalEarth } from './lib/sources.mjs';
+import { buildGlobeBands, degreeGridOf, nearestAt } from './lib/seafloor.mjs';
+import { etopo, etopoRequest, licencesWith, NATURAL_EARTH_VERSION, naturalEarth, SEAFLOOR_AGE, seafloorAge } from './lib/sources.mjs';
+import { readEsriAscii } from './lib/worldheights.mjs';
 import { unzip } from './lib/zip.mjs';
 
 /** globe.json as it is written: an entry of a layer on a line of its own. */
@@ -41,12 +49,16 @@ export function globeText(globe) {
 }
 
 /** The rows of SOURCES.md that say what each layer of a body is made of. */
-function layerRows(globe) {
+function layerRows(globe, licences = licencesWith()) {
   const m = globe.made;
   if (globe.body === 'moon') {
     return [`| \`maria\` | LROC Global Mare Boundaries (Nelson et al. 2014), digitised from LROC WAC mosaics, IAU Moon 2000 | thinned on the sphere to ${m.tolerance}° of arc; maria and islands in them under ${m.minArea} km² left out |`];
   }
+  const bands = (kind) => Object.keys(globe.layers).filter((k) => k.startsWith(`${kind}-`));
+  const traced = (o) => `each cell of ${o.cell}° taking the band of the mean of 16 points across it, traced along the cells in four lunes of 90° of longitude (a band is parted at -90°, 0°, 90° and 180°), thinned together to ${Math.max(m.tolerance, 2 * o.cell)}° of arc; polygons under ${o.minArea} km² left out`;
   return [
+    ...(m.depths ? [`| ${bands('depth').map((k) => `\`${k}\``).join(', ')} | ${licences.etopo.name} | the depth of the sea in bands (${m.depths.levels.join(', ')} m), a sample every ${m.depths.stride} arc-minutes, ${traced(m.depths)} |`] : []),
+    ...(m.seafloorAge ? [`| ${bands('age').map((k) => `\`${k}\``).join(', ')} | ${licences['earthbyte-age'].name} | the age of the crust in bands (${m.seafloorAge.levels.join(', ')} million years), ${traced(m.seafloorAge)} |`] : []),
     `| \`land\` | Natural Earth ${NATURAL_EARTH_VERSION}, 1:${m.scale}m land | made whole on the sphere (the cut along the south pole and down the 180th meridian taken out), thinned to ${m.tolerance}° of arc, polygons under ${m.minArea} km² left out |`,
     `| \`lakes\` | Natural Earth ${NATURAL_EARTH_VERSION}, 1:${m.scale}m lakes | as the land; lakes under ${m.lakeArea} km² left out |`,
     `| \`ice\` | Natural Earth ${NATURAL_EARTH_VERSION}, 1:${m.scale}m glaciated areas and 1:50m Antarctic ice shelves | as the land; ice under ${m.iceArea} km² left out |`,
@@ -57,6 +69,7 @@ function layerRows(globe) {
 /** SOURCES.md of a globe build. */
 export function globeSourcesText(globe, lock, { command = 'globe.mjs', licences = licencesWith() } = {}) {
   const used = [...new Set(lock.map((d) => d.source))].map((key) => licences[key]);
+  const required = used.some((l) => l.required);
   return [
     `# ${globe.name}: the sources of its layers`,
     '',
@@ -64,10 +77,12 @@ export function globeSourcesText(globe, lock, { command = 'globe.mjs', licences 
     '',
     '## Credits for the description of a film',
     '',
-    'A film that shows these layers may carry this line in its description (a courtesy: the data is in the public domain):',
+    required
+      ? 'A film that shows these layers carries these lines in its description (where a licence requires its credit, that line is not left out):'
+      : 'A film that shows these layers may carry this line in its description (a courtesy: the data is in the public domain):',
     '',
     '```',
-    ...used.map((l) => l.credit),
+    ...used.map((l) => l.credit).filter((c) => c !== ''),
     '```',
     '',
     '| Source | Licence | Credit | Terms |',
@@ -78,7 +93,7 @@ export function globeSourcesText(globe, lock, { command = 'globe.mjs', licences 
     '',
     '| Layer | Source | How |',
     '|---|---|---|',
-    ...layerRows(globe),
+    ...layerRows(globe, licences),
     '',
     '## The downloads',
     '',
@@ -106,12 +121,13 @@ export async function runGlobe(argv, { root = process.cwd(), command = 'globe.mj
     options: {
       body: { type: 'string' }, root: { type: 'string' }, cache: { type: 'string' }, offline: { type: 'boolean' }, update: { type: 'boolean' }, preview: { type: 'boolean' },
       scale: { type: 'string' }, tolerance: { type: 'string' }, 'min-area': { type: 'string' }, 'lake-area': { type: 'string' }, 'ice-area': { type: 'string' }, 'min-pop': { type: 'string' },
+      'seafloor-age': { type: 'string' }, depths: { type: 'string' }, 'seafloor-cell': { type: 'string' },
     },
   });
   const body = values.body ?? 'earth';
   if (!Object.hasOwn(BODIES, body)) throw new Error(`globe: --body is one of ${Object.keys(BODIES).join(', ')}, got ${JSON.stringify(body)}`);
   if (body === 'moon') {
-    for (const k of ['scale', 'lake-area', 'ice-area', 'min-pop']) if (values[k] !== undefined) throw new Error(`globe: --${k} is an option of the Earth; the Moon has its maria alone`);
+    for (const k of ['scale', 'lake-area', 'ice-area', 'min-pop', 'seafloor-age', 'depths', 'seafloor-cell']) if (values[k] !== undefined) throw new Error(`globe: --${k} is an option of the Earth; the Moon has its maria alone`);
   }
   const D = GLOBE_DEFAULTS[body];
   const opt = (key, name, min, max) => (values[name] === undefined ? D[key] : number(values[name], `--${name}`, min, max));
@@ -119,6 +135,18 @@ export async function runGlobe(argv, { root = process.cwd(), command = 'globe.mj
     body === 'earth'
       ? { scale: opt('scale', 'scale', 50, 110), tolerance: opt('tolerance', 'tolerance', 0, 5), minArea: opt('minArea', 'min-area', 0, 1e7), lakeArea: opt('lakeArea', 'lake-area', 0, 1e7), iceArea: opt('iceArea', 'ice-area', 0, 1e7), minPop: opt('minPop', 'min-pop', 0, 1e9), digits: D.digits }
       : { tolerance: opt('tolerance', 'tolerance', 0, 5), minArea: opt('minArea', 'min-area', 0, 1e7), digits: D.digits };
+  // The sea floor of the Earth: bands of age of the crust, bands of depth of the sea.
+  const levelsOf = (name, max) => {
+    if (values[name] === undefined) return null;
+    const list = String(values[name]).split(',').map((v) => number(v, `--${name}`, 1, max));
+    if (list.some((v, k) => k > 0 && v <= list[k - 1])) throw new Error(`globe: the values of --${name} run up, each once`);
+    return list;
+  };
+  const ageLevels = levelsOf('seafloor-age', 4000);
+  const depthLevels = levelsOf('depths', 11000);
+  if (values['seafloor-cell'] !== undefined && !ageLevels && !depthLevels) throw new Error('globe: --seafloor-cell is the cell of the sea floor: give --seafloor-age or --depths with it');
+  const cell = values['seafloor-cell'] === undefined ? 0.5 : number(values['seafloor-cell'], '--seafloor-cell', 0.05, 5);
+  if (Math.abs(90 / cell - Math.round(90 / cell)) > 1e-9) throw new Error(`globe: --seafloor-cell is degrees that divide 90 (0.25, 0.5, 1), got ${cell}`);
   const names = body === 'earth' ? earthSources(made.scale) : null;
   const home = resolve(values.root ?? root);
   const cache = values.cache ?? join(home, 'cache');
@@ -154,6 +182,30 @@ export async function runGlobe(argv, { root = process.cwd(), command = 'globe.mj
     const got = await download({ cache, id: m.id, urls: [m.url], ext: 'zip', offline, log, check: (d) => (d[0] === 0x50 && d[1] === 0x4b ? null : 'not a ZIP archive') });
     const zip = readFileSync(locked(got, { id: m.id, source: 'lroc', request: m.request, dataDate: m.dataDate }));
     built = buildMoon({ maria: readShapefile(unzip(zip, /\.shp$/i), unzip(zip, /\.dbf$/i)) }, made);
+  }
+  if (depthLevels || ageLevels) {
+    // Painted first, under the land: the bands of depth, then the bands of age.
+    const floor = {};
+    // A polygon of the sea floor smaller than two cells at the equator is a speck of the cells, left out.
+    const floorArea = Math.max(made.minArea, Math.round(2 * cell * cell * ((Math.PI / 180) * BODIES[body].radiusKm) ** 2));
+    const bandOptions = { cell, tolerance: made.tolerance, minArea: floorArea, digits: made.digits, radiusKm: BODIES[body].radiusKm };
+    if (depthLevels) {
+      const stride = Math.max(1, Math.min(60, Math.round((cell * 60) / 2)));
+      const box = [-180, -90, 180, 90];
+      const got = await etopo({ cache, box, stride, offline, log });
+      const heights = readEsriAscii(readFileSync(locked(got, { id: `etopo1-${stride}m`, source: 'etopo', request: etopoRequest(box, stride).url, dataDate: 'ETOPO1 (2009)' }), 'utf8'));
+      log('  sea floor: the depth of the sea, in bands');
+      Object.assign(floor, buildGlobeBands('depth', (lon, lat) => -nearestAt(heights, lon, lat), { ...bandOptions, levels: depthLevels }));
+      made.depths = { levels: depthLevels, cell, stride, minArea: floorArea };
+    }
+    if (ageLevels) {
+      const got = await seafloorAge({ cache, offline, log });
+      const ages = degreeGridOf(readFileSync(locked(got, { id: SEAFLOOR_AGE.id, source: 'earthbyte-age', request: SEAFLOOR_AGE.request, dataDate: SEAFLOOR_AGE.dataDate })));
+      log('  sea floor: the age of the crust, in bands');
+      Object.assign(floor, buildGlobeBands('age', (lon, lat) => nearestAt(ages, lon, lat), { ...bandOptions, levels: ageLevels }));
+      made.seafloorAge = { levels: ageLevels, cell, minArea: floorArea };
+    }
+    built.layers = { ...floor, ...built.layers };
   }
   const globe = { format: 'globe-geo/1', body, name: BODIES[body].name, radiusKm: BODIES[body].radiusKm, units: UNITS, made, ...built };
   const count = (list) => `${list.length} (${list.reduce((n, p) => n + p.rings.reduce((k, r) => k + r.length, 0), 0)} points)`;

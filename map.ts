@@ -356,6 +356,9 @@ export interface GlobePolygon {
   id: string;
   areaKm2: number;
   name?: string;
+  /** A polygon of a band of the sea floor (built with --seafloor-age or --depths): the band's values, `to` null for the last. */
+  from?: number;
+  to?: number | null;
   rings: LonLat[][];
 }
 
@@ -377,10 +380,24 @@ export interface GlobeLayers {
   /** The body's mean radius, in kilometres: the areas are of a sphere of it. */
   radiusKm: number;
   /** What it was built with: the thinning in degrees of arc, the least areas in km², and for the Earth the scale of Natural Earth and the least population kept. */
-  made: { tolerance: number; minArea: number; digits: number; scale?: number; lakeArea?: number; iceArea?: number; minPop?: number };
+  made: {
+    tolerance: number;
+    minArea: number;
+    digits: number;
+    scale?: number;
+    lakeArea?: number;
+    iceArea?: number;
+    minPop?: number;
+    /** The bands of depth (--depths): their levels in metres, the cell in degrees, the stride of ETOPO1 in arc-minutes. */
+    depths?: { levels: number[]; cell: number; stride: number; minArea: number };
+    /** The bands of age (--seafloor-age): their levels in millions of years, the cell in degrees, the least polygon in km². */
+    seafloorAge?: { levels: number[]; cell: number; minArea: number };
+  };
   /**
    * The layers, in the order they are painted, each the largest polygon first. The Earth's: `land`, `lakes` (over the
-   * land) and `ice` (over the land and the sea). The Moon's: `maria`, its dark seas of basalt over the highlands.
+   * land) and `ice` (over the land and the sea); under them, when asked for, the bands of depth of the sea
+   * (`depth-0-200`, ..., `depth-6000-more`) and of age of the ocean floor (`age-0-20`, ..., `age-140-more`), one layer a
+   * band. The Moon's: `maria`, its dark seas of basalt over the highlands.
    */
   layers: Record<string, GlobePolygon[]>;
   /** The Earth's towns by their greatest population, the largest first. */
@@ -499,6 +516,33 @@ export interface WorldShallows {
   holes: Ring[];
 }
 
+/**
+ * A band of the age of the ocean floor (built with --seafloor-age): the crust from `from` to `to` million years old
+ * (`to` null: the oldest band, open), its outlines and the other bands (or no oceanic crust) inside them. Two bands
+ * share their border point for point.
+ */
+export interface WorldBand {
+  /** `age-<from>-<to>`, the last `age-<from>-more`. */
+  id: string;
+  from: number;
+  to: number | null;
+  /** Its outlines, counter-clockwise, the largest first. */
+  rings: Ring[];
+  /** What is not of it inside them, counter-clockwise too. */
+  holes: Ring[];
+}
+
+/** A group of kinds of sediment of the sea floor (built with --sediments), as a band is: its outlines and what is not of it inside them. */
+export interface WorldSediment {
+  /** The group's name as the option gave it (`carbonate`), or a kind's own (`calcareous-ooze`) for `all`. */
+  id: string;
+  /** The codes of the kinds it joins, of the seafloor lithology grid, and their names. */
+  codes: number[];
+  names: string[];
+  rings: Ring[];
+  holes: Ring[];
+}
+
 /** A first-level division of a country of a world map (a state, a province), from Natural Earth's 1:10m admin-1. */
 export interface WorldDivision {
   /** Its ISO 3166-2 code in lower case (`de-by` for `DE-BY`) where it has one of its own, else Natural Earth's code (`deu-1591`). */
@@ -592,6 +636,8 @@ export interface WorldLayers {
     rivers?: { rank: number | null; names: string[] };
     towns?: number;
     waterRisk?: string;
+    /** The sea floor (--seafloor-age, --sediments): the cell it was traced on and the thinning, in metres, and what was asked for. */
+    seafloor?: { cell: number; tol: number; ageLevels?: number[]; sediments?: string };
   };
   frame: WorldFrame;
   /** All the land, the countries as one, the largest first. */
@@ -623,6 +669,10 @@ export interface WorldLayers {
   towns?: WorldTown[];
   /** An indicator of WRI's Aqueduct 4.0 by category (built with --water-risk); its credit is required. */
   waterRisk?: { indicator: string; classes: WorldRiskClass[] };
+  /** The age of the ocean floor in bands, the youngest first (built with --seafloor-age); its credit is required. */
+  seafloorAge?: WorldBand[];
+  /** The sediments of the sea floor by group, in the order asked for (built with --sediments); its credit is required. */
+  sediments?: WorldSediment[];
 }
 
 /** A world map, read from world.json: a path, or a URL made from `import.meta.url`. */
@@ -774,6 +824,24 @@ export function worldFaults(w: WorldLayers): string[] {
       if (k > 0 && t.pop > w.towns[k - 1]!.pop) out.push(`towns.${t.id}: larger than the town before it`);
       if (!inBox([t.at])) out.push(`towns.${t.id}: outside the frame's box`);
       if (!(Math.abs(t.lonlat[0]) <= 180 && Math.abs(t.lonlat[1]) <= 90)) out.push(`towns.${t.id}: not a place on the Earth`);
+    }
+  }
+  for (const [name, list] of [['seafloorAge', w.seafloorAge], ['sediments', w.sediments]] as const) {
+    if (!list) continue;
+    unique(name, list);
+    for (const a of list) {
+      if (a.rings.length === 0) out.push(`${name}.${a.id}: no rings`);
+      for (const [j, r] of a.rings.entries()) {
+        ring(`${name}.${a.id}.${j}`, r);
+        if (j > 0 && area(r) > area(a.rings[j - 1]!)) out.push(`${name}.${a.id}.${j}: larger than the ring before it`);
+      }
+      for (const [j, r] of a.holes.entries()) ring(`${name}.${a.id}.holes.${j}`, r);
+    }
+  }
+  if (w.seafloorAge) {
+    for (const [k, b] of w.seafloorAge.entries()) {
+      if (k > 0 && !(b.from > w.seafloorAge[k - 1]!.from)) out.push(`seafloorAge.${b.id}: not older than the band before it`);
+      if (b.to !== null && !(b.to > b.from)) out.push(`seafloorAge.${b.id}: ends before it begins`);
     }
   }
   if (w.waterRisk) {
@@ -1271,6 +1339,41 @@ export function waterRiskOnStage(view: View, world: WorldLayers, o: WorldStageOp
       return { cat: c.cat, label: c.label, rings, holes: whole(g.gaps) };
     })
     .filter((c) => c.rings.length > 0);
+}
+
+/** Areas of a world map on the stage, as `areasOnStage` gives them: each entry as it was, its rings and holes on the stage. */
+export type AreaOnStage<T> = Omit<T, 'rings' | 'holes'> & { rings: Point[][]; holes: Point[][] };
+
+/**
+ * Areas of a world map that share their borders on the stage: the bands of the age of the ocean floor
+ * (`world.seafloorAge`), the groups of its sediments (`world.sediments`), or any list of `{ rings, holes }` of the
+ * map's plane. Each is cut to the view and its margin, and all are thinned together again, so two of them share their
+ * border point for point on the stage too; each keeps its other fields. Painted as `waterRiskOnStage`'s categories
+ * are: an area is `rings` less its `holes` (`fillRings({ rings: [...a.rings, ...a.holes] })`, which fills by winding),
+ * or every ring painted as a flat region in the order of the list, so what lies in a hole is painted over it. An area
+ * the view does not hold is left out. Their outer edge follows the cells they were traced on: paint the land over
+ * them, and clip them to the sea of a whole world (`worldOnStage(...).sea`).
+ */
+export function areasOnStage<T extends { rings: Ring[]; holes: Ring[] }>(view: View, areas: readonly T[], o: WorldStageOptions = {}): AreaOnStage<T>[] {
+  const detail = o.detail ?? 0.3;
+  const minArea = o.minArea ?? 2;
+  if (!(detail > 0)) throw new Error(`areasOnStage: detail must be above 0, got ${detail}`);
+  const box = grown(view, o.margin ?? 120);
+  const [cx, cy] = [(view.box[0] + view.box[2]) / 2, (view.box[1] + view.box[3]) / 2];
+  const [ax, ay] = view.project([cx, cy]);
+  const raw = (p: readonly number[]): Point => [ax + (p[0]! - cx) * view.scale, ay - (p[1]! - cy) * view.scale];
+  const cut = (ring: Ring): Point[][] => clipRing(ring, box).map((piece) => piece.map(raw));
+  const t = thinTogether(
+    areas.map((a, k) => ({ rings: [...a.rings.flatMap((r) => cut(r).map((points) => ({ points }))), ...a.holes.flatMap((r) => cut(r).map((points) => ({ points, hole: true })))], group: k })),
+    { tol: detail, minArea, digits: 1 },
+  );
+  const whole = (rings: Point[][]): Point[][] => rings.map((r) => (crosses(r, true) ? untangle(r) : r)).filter((r): r is Point[] => r !== null && r.length >= 3 && area(r) >= minArea);
+  return (t.groups ?? [])
+    .map((g) => {
+      const { rings: _r, holes: _h, ...rest } = areas[g.key as number]!;
+      return { ...rest, rings: whole(g.land), holes: whole(g.gaps) } as AreaOnStage<T>;
+    })
+    .filter((a) => a.rings.length > 0);
 }
 
 export interface DivisionsOnStage {

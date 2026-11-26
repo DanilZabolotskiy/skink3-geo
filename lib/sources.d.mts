@@ -37,3 +37,7 @@ export function etopo(o: Fetch & { box: Box; stride: number; part?: number }): P
 export function creditOf(row: Licence, key: string, lock?: readonly { source: string; retrieved?: string }[]): string;
 export const AQUEDUCT: { id: string; url: string; request: string; dataDate: string; table: string };
 export function aqueduct(o: Fetch): Promise<Download>;
+export const SEAFLOOR_AGE: { id: string; url: string; request: string; dataDate: string };
+export const SEAFLOOR_LITHOLOGY: { id: string; commit: string; url: string; request: string; dataDate: string };
+export function seafloorAge(o: Fetch): Promise<Download>;
+export function seafloorLithology(o: Fetch): Promise<Download>;

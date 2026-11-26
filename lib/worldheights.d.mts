@@ -34,3 +34,4 @@ export function buildHeights(
   frame: WorldFrameOf,
   o: { cell: number; detail: number; minArea?: number; shallows?: readonly number[] },
 ): { heights: PlaneHeights; shallows: BuiltShallows[] };
+export function inverseOf(frame: WorldFrameOf): (p: readonly number[]) => LonLat | null;

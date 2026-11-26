@@ -23,6 +23,11 @@
 //   --towns <people>    the towns of Natural Earth's populated places with at least that many people, as points
 //   --water-risk <ind>  an indicator of WRI's Aqueduct 4.0 by category, as regions (--water-risk bws: baseline water
 //                       stress); its credit is required
+//   --seafloor-age <my> the age of the ocean floor in bands between these ages, millions of years (--seafloor-age
+//                       20,40,60,80,100,140): EarthByte's age grid (Seton et al. 2020); its credit is required
+//   --sediments <list>  the sediments of the sea floor by kind: all, or groups (--sediments carbonate=5+9+13,other=rest):
+//                       EarthByte's seafloor lithology (Dutkiewicz et al. 2015); its credit is required
+//   --seafloor-cell <m> the cells the sea floor is traced on, in metres (the box's longer side cut into 1600)
 //   --offline           from the cache alone: nothing is fetched
 //   --update            takes downloads that differ from the lock
 //
@@ -46,7 +51,8 @@ import { parseArgs } from 'node:util';
 import { overpass, sha256 } from './lib/fetch.mjs';
 import { elementLines } from './lib/layers.mjs';
 import { overpassDate, readOverpass } from './lib/osm.mjs';
-import { AQUEDUCT, aqueduct, creditOf, etopo, etopoRequest, licencesWith, NATURAL_EARTH_VERSION, naturalEarth, SHIPPING_LANES_COMMIT, shippingLanes } from './lib/sources.mjs';
+import { AQUEDUCT, aqueduct, creditOf, etopo, etopoRequest, licencesWith, NATURAL_EARTH_VERSION, naturalEarth, SEAFLOOR_AGE, SEAFLOOR_LITHOLOGY, seafloorAge, seafloorLithology, SHIPPING_LANES_COMMIT, shippingLanes } from './lib/sources.mjs';
+import { buildWorldAge, buildWorldSediments, degreeGridOf, seafloorCell, sedimentGroups } from './lib/seafloor.mjs';
 import { buildWorld, worldSources } from './lib/world.mjs';
 import { buildRivers, buildTowns, buildWaterRisk, readWaterRisk, riverPicks } from './lib/worldthemes.mjs';
 import { buildHeights, heightsPlan, joinGrids, readEsriAscii } from './lib/worldheights.mjs';
@@ -108,6 +114,8 @@ export function worldSourcesText(world, lock, { command = 'world.mjs', licences 
     ...(world.rivers ? [`| \`rivers\` | Natural Earth ${NATURAL_EARTH_VERSION}, 1:${m.scale}m rivers and lake centerlines | ${[m.rivers.rank === null ? '' : `the rivers of rank ${m.rivers.rank} and below`, m.rivers.names.length > 0 ? `by name: ${m.rivers.names.join(', ')}` : ''].filter((t) => t).join('; ')}; the pieces of a river joined, thinned to ${m.detail} m${cut}; ${world.rivers.length} rivers |`] : []),
     ...(world.towns ? [`| \`towns\` | Natural Earth ${NATURAL_EARTH_VERSION}, 1:10m populated places | the towns of at least ${m.towns} people (their greatest population), the largest first; ${world.towns.length} towns |`] : []),
     ...(world.waterRisk ? [`| \`waterRisk\` | ${licences.aqueduct.name} | the indicator \`${world.waterRisk.indicator}\` by category: its pieces thinned together to ${m.detail} m and each category's made one${cut}; ${world.waterRisk.classes.map((c) => `${c.cat} ${c.label}`).join('; ')} |`] : []),
+    ...(world.seafloorAge ? [`| \`seafloorAge\` | ${licences['earthbyte-age'].name} | the age of the crust in bands (${m.seafloor.ageLevels.join(', ')} million years), each cell of ${m.seafloor.cell} m taking the band of the mean of 16 points across it, traced along the cells and thinned together to ${m.seafloor.tol} m; ${world.seafloorAge.map((b) => b.id).join(', ')} |`] : []),
+    ...(world.sediments ? [`| \`sediments\` | ${licences['earthbyte-lithology'].name} | the kinds of sediment, grouped (${world.sediments.map((g) => `${g.id}: ${g.codes.join('+')}`).join('; ')}), each cell of ${m.seafloor.cell} m taking the group most of its points have, traced along the cells and thinned together to ${m.seafloor.tol} m |`] : []),
     '',
     '## The downloads',
     '',
@@ -140,6 +148,7 @@ export async function runWorld(argv, { root = process.cwd(), command = 'world.mj
       scale: { type: 'string' }, bbox: { type: 'string' }, centre: { type: 'string' }, detail: { type: 'string' }, 'min-area': { type: 'string' }, lakes: { type: 'string' },
       lanes: { type: 'boolean' }, features: { type: 'string' }, heights: { type: 'boolean' }, 'heights-cell': { type: 'string' }, shallows: { type: 'string' },
       divisions: { type: 'string' }, rivers: { type: 'string' }, towns: { type: 'string' }, 'water-risk': { type: 'string' },
+      'seafloor-age': { type: 'string' }, sediments: { type: 'string' }, 'seafloor-cell': { type: 'string' },
     },
   });
   const bbox = values.bbox === undefined ? null : numbers(values.bbox, 4, '--bbox');
@@ -172,6 +181,11 @@ export async function runWorld(argv, { root = process.cwd(), command = 'world.mj
   const towns = values.towns === undefined ? null : number(values.towns, '--towns', 0, 1e9);
   const waterRisk = values['water-risk'] === undefined ? null : String(values['water-risk']);
   if (waterRisk !== null && !/^[a-z][a-z0-9_]*$/.test(waterRisk)) throw new Error(`world: --water-risk names an indicator of Aqueduct in small letters (bws), got ${JSON.stringify(waterRisk)}`);
+  // The sea floor: the age of the crust in bands, the sediments by kind.
+  const ageLevels = values['seafloor-age'] === undefined ? null : String(values['seafloor-age']).split(',').map((v) => number(v, '--seafloor-age', 1, 4000));
+  if (ageLevels && ageLevels.some((v, k) => k > 0 && v <= ageLevels[k - 1])) throw new Error('world: the ages of --seafloor-age run from the youngest up, each once');
+  const sediments = values.sediments === undefined ? null : sedimentGroups(values.sediments);
+  if (values['seafloor-cell'] !== undefined && !ageLevels && !sediments) throw new Error('world: --seafloor-cell is the cell of the sea floor: give --seafloor-age or --sediments with it');
   const home = resolve(values.root ?? root);
   // What the map holds beyond its countries: each asked for by an option of its own, none by default.
   let features = null;
@@ -266,7 +280,24 @@ export async function runWorld(argv, { root = process.cwd(), command = 'world.mj
     made.waterRisk = waterRisk;
     extra.waterRisk = buildWaterRisk(rows, layers.frame, { detail: layers.made.detail, minArea: layers.made.minArea * 1e6, indicator: waterRisk });
   }
-  for (const key of ['lanes', 'features', 'heights', 'rivers', 'towns', 'waterRisk']) if (made[key] !== undefined) layers.made[key] = made[key];
+  if (ageLevels || sediments) {
+    const cell = values['seafloor-cell'] === undefined ? seafloorCell(layers.frame) : number(values['seafloor-cell'], '--seafloor-cell', 100, 1e6);
+    // The cells' stairs are thinned away at one and a half cells.
+    const tol = Math.max(layers.made.detail, Math.round(1.5 * cell));
+    const minArea = layers.made.minArea * 1e6;
+    made.seafloor = { cell, tol, ...(ageLevels ? { ageLevels } : {}), ...(sediments ? { sediments: String(values.sediments) } : {}) };
+    if (ageLevels) {
+      const got = await seafloorAge({ cache, offline: values.offline ?? false, log });
+      log('  sea floor: the age of the crust, in bands');
+      extra.seafloorAge = buildWorldAge(degreeGridOf(readFileSync(note(SEAFLOOR_AGE.id, 'earthbyte-age', SEAFLOOR_AGE.request, got, SEAFLOOR_AGE.dataDate))), layers.frame, { levels: ageLevels, cell, tol, minArea });
+    }
+    if (sediments) {
+      const got = await seafloorLithology({ cache, offline: values.offline ?? false, log });
+      log('  sea floor: the sediments, by kind');
+      extra.sediments = buildWorldSediments(degreeGridOf(readFileSync(note(SEAFLOOR_LITHOLOGY.id, 'earthbyte-lithology', SEAFLOOR_LITHOLOGY.request, got, SEAFLOOR_LITHOLOGY.dataDate))), layers.frame, { groups: sediments, cell, tol, minArea });
+    }
+  }
+  for (const key of ['lanes', 'features', 'heights', 'rivers', 'towns', 'waterRisk', 'seafloor']) if (made[key] !== undefined) layers.made[key] = made[key];
   const world = { format: 'world-geo/1', id: map, name: values.name ?? (bbox ? map : 'The world'), units: UNITS, ...layers, ...extra };
   const count = (rings) => `${rings.length} (${rings.reduce((n, r) => n + r.length, 0)} points)`;
   log(`  countries ${world.countries.length}, ${count(world.countries.flatMap((c) => c.rings))}; land ${count(world.land.map((l) => l.ring))}; gaps ${world.gaps.length}; boundaries ${world.boundaries.length}; lakes ${world.lakes.length}`);
@@ -278,6 +309,8 @@ export async function runWorld(argv, { root = process.cwd(), command = 'world.mj
   if (world.rivers) log(`  rivers ${world.rivers.length}: ${world.rivers.slice(0, 12).map((r) => r.name).join(', ')}${world.rivers.length > 12 ? ', ...' : ''}`);
   if (world.towns) log(`  towns ${world.towns.length}`);
   if (world.waterRisk) log(`  water risk (${world.waterRisk.indicator}): ${world.waterRisk.classes.map((c) => `${c.cat} ${count(c.rings)}`).join('; ')}`);
+  if (world.seafloorAge) log(`  age of the sea floor: ${world.seafloorAge.map((b) => `${b.id} ${count(b.rings)}`).join('; ')}`);
+  if (world.sediments) log(`  sediments: ${world.sediments.map((g) => `${g.id} ${count(g.rings)}`).join('; ')}`);
   if (stats.crossing > 0 || stats.open > 0) log(`  note: ${stats.crossing} ring(s) still cross themselves, ${stats.open} stretch(es) of coast do not close: the data has a fault there`);
   mkdirSync(outDir, { recursive: true });
   writeFileSync(join(outDir, 'world.json'), worldText(world));
