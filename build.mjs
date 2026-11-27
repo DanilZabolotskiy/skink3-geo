@@ -29,7 +29,8 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { readGeoTiff, readHgt, reduceTile, sampler, scaleOf, seaTile, waterSampler, waterShare } from './lib/dem.mjs';
 import { builtShare, GHSL_RELEASE, GHSL_YEARS, ghslTile, ghslTilesOf, ghslUrl, mollweideBox } from './lib/ghsl.mjs';
-import { area } from './lib/geom.mjs';
+import { area, clipRing, orient, roundPoints, simplifySafe } from './lib/geom.mjs';
+import { blockClasses, blockSquares, blockStreets, buildBlocks, checkBlocks } from './lib/blocks.mjs';
 import { readRaster } from './lib/tiff.mjs';
 import { unzip } from './lib/zip.mjs';
 import { overpass } from './lib/fetch.mjs';
@@ -170,6 +171,15 @@ export function requestsOf(spec, frames) {
     // Natural Earth's roads are a file of its own, not a query: only its classes are held to what it has.
     const classes = streetClasses(spec.streets).join('|');
     if (source !== 'natural-earth') out.streets = { source, id: `${spec.city}-${source}-streets`, query: ql([`way["highway"~"^(${classes})$"](${b});`], 'out geom;') };
+  }
+  if (spec.blocks?.from !== undefined) {
+    // The streets that part the city's blocks, of every class asked for, and its open squares.
+    checkBlocks(spec.blocks);
+    const b = overpassBox(boxOfLayer(spec.blocks, frames).lonlat);
+    const source = spec.blocks.from;
+    const classes = blockClasses(spec.blocks).classes.join('|');
+    const squares = spec.blocks.squares === false ? [] : [`way["place"="square"](${b});`, `relation["place"="square"](${b});`, `way["highway"="pedestrian"]["area"="yes"](${b});`];
+    out.blocks = { source, id: `${spec.city}-${source}-blocks`, query: ql([`way["highway"~"^(${classes})$"](${b});`, ...squares], 'out geom;') };
   }
   if (spec.divisions) {
     const b = overpassBox(boxOfLayer(spec.divisions, frames).lonlat);
@@ -506,6 +516,48 @@ export async function run(argv, { root = process.cwd(), command = 'build.mjs', s
       use('city.streets', source, `highways of ${SOURCE_NAME[source]}: ${(spec.streets.classes ?? ['motorway', 'trunk', 'primary']).join(', ')}${source === 'ohm' ? ', each with the years it stood' : ''}`);
     }
     log(`  streets ${cityLayers.streets.length}, ${Math.round(cityLayers.streets.reduce((sum, x) => sum + x.lengthKm, 0))} km`);
+  }
+
+  if (spec.blocks) {
+    // The blocks: the land the streets leave inside the city's bounds, and its open squares.
+    const b = spec.blocks;
+    checkBlocks(b);
+    const { box } = boxOfLayer(b, frames);
+    const { proj } = frames.city;
+    const elements = b.from ? answers.blocks : [];
+    const year = b.from === 'ohm' ? b.year ?? null : null;
+    const squares = b.squares === false || !b.from ? [] : blockSquares(elements, year);
+    const squareRings = squares.flatMap((sq) => sq.outer.map((r) => r.map(proj.forward)));
+    let within = null;
+    if (b.within?.wall) {
+      const wall = (cityLayers.walls ?? []).find((w) => w.id === b.within.wall);
+      if (!wall) throw new Error(`blocks: "within" names the wall "${b.within.wall}", which the spec does not build (walls: ${(cityLayers.walls ?? []).map((w) => w.id).join(', ') || 'none'})`);
+      within = wall.ring;
+    } else if (b.within?.points) within = b.within.points.map(proj.forward);
+    const water = b.water === false ? [] : (cityLayers.water ?? []).map((w) => w.ring);
+    cityLayers.blocks = buildBlocks(b, { box }, { streets: blockStreets(b, proj, elements), squares: squareRings, water, within });
+    if (squares.length > 0) {
+      cityLayers.squares = [];
+      for (const sq of squares) {
+        for (const ring of sq.outer) {
+          for (const piece of clipRing(ring.map(proj.forward), box)) {
+            const thin = simplifySafe(piece, b.detail ?? 1.5, true);
+            if (!thin || thin.length < 3 || area(thin) < (b.minArea ?? 150)) continue;
+            const pts = orient(roundPoints(thin, 1, true), true);
+            cityLayers.squares.push({ id: `square-${cityLayers.squares.length}`, ...(sq.tags.name ? { name: sq.tags.name } : {}), areaHa: Math.round(area(pts) / 100) / 100, ring: pts });
+          }
+        }
+      }
+    }
+    const what = [
+      b.from ? `highways of ${SOURCE_NAME[b.from]} (${blockClasses(b).classes.join(', ')})${year !== null ? ` that stood in ${year}` : ''}` : null,
+      b.lines?.length ? `${b.lines.length} street(s) drawn by hand` : null,
+    ].filter(Boolean).join(' and ');
+    const made = `the blocks between them${within ? ' inside the city\'s bounds' : ''}, each street as wide as its class, the squares${water.length ? ' and the water' : ''} left open, traced on a raster of ${b.cell ?? 2} m`;
+    if (b.from) use('city.blocks', b.from, `${what}: ${made}`);
+    if (b.lines?.length) use('city.blocks', 'own', `${what}: ${made}`);
+    if (cityLayers.squares) use('city.squares', b.from, `open squares of ${SOURCE_NAME[b.from]} (place=square, pedestrian areas)`);
+    log(`  blocks ${cityLayers.blocks.length}, ${Math.round(cityLayers.blocks.reduce((n, x) => n + x.areaHa, 0))} ha, ${cityLayers.blocks.reduce((n, x) => n + x.ring.length, 0)} points; squares ${cityLayers.squares?.length ?? 0}`);
   }
 
   const builtUp = [];

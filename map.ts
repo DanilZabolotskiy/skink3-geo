@@ -12,6 +12,7 @@
 //   const lit = gridOnStage(view, town.city.relief!.grid!);                        // a grid of heights for relief shading
 //   const h = heightAt(town.city.relief!.grid!, [500, -200]);                     // metres, for placing things
 //   const shore = shoresOnStage(view, town.city.water!.map((f) => f.ring));        // the shores, without the cut
+//   const fabric = blocksOnStage(view, town.city.blocks!, { merge: 4 });            // the blocks, joined across lanes under 4 units
 //
 // A round body for a globe (globe.mjs) is read the same way: `loadGlobe`, in degrees, for a renderer's own sphere.
 // A flat map of the world or of the countries of a box (world.mjs) is read with `loadWorld`, in metres on its frame's
@@ -27,6 +28,7 @@ import { equalEarth, projection, type LonLat } from './lib/project.mjs';
 import { sphericalArea, wholeRing } from './lib/globe.mjs';
 import { arcLength, cutLine, greatCircle, routeAlong as routeOnPlane, type Route } from './lib/route.mjs';
 import { thinTogether, untangle } from './lib/topology.mjs';
+import { mergeBlocks } from './lib/blocks.mjs';
 
 export type { Box, LonLat, Point, Route };
 export { arcLength, cutLine, greatCircle };
@@ -139,6 +141,13 @@ export interface CityFrameLayers {
     grid?: HeightGrid;
   };
   walls?: { id: string; name: string; built?: number; lengthKm: number; areaHa: number; ring: Ring }[];
+  /**
+   * The blocks of the city: the land its streets leave between them inside its bounds, each street as wide as its class,
+   * the squares and the water left open; counter-clockwise, the largest first. A court closed all round is not a hole.
+   */
+  blocks?: { id: string; areaHa: number; ring: Ring }[];
+  /** The open squares among the blocks (mapped squares and pedestrian areas), cut to the view of the blocks. */
+  squares?: { id: string; name?: string; areaHa: number; ring: Ring }[];
   /** Main streets, the widest class first. `from` and `to` are the years a street stood, where its source dates it. */
   streets?: { id: string; class: string; name?: string; ref?: string; from?: number; to?: number; lengthKm: number; lines: Line[] }[];
   /**
@@ -285,6 +294,8 @@ export function faultsOf(l: Layers): string[] {
     for (const [k, r] of h.rings.entries()) ring(`city.relief.hills.${h.id}.${k}`, r.ring, city);
   }
   for (const w of l.city.walls ?? []) ring(`city.walls.${w.id}`, w.ring, city);
+  for (const b of l.city.blocks ?? []) ring(`city.blocks.${b.id}`, b.ring, city);
+  for (const q of l.city.squares ?? []) ring(`city.squares.${q.id}`, q.ring, city);
   for (const b of l.city.builtUp ?? []) {
     ring(`city.builtUp.${b.id}`, b.ring, city);
     for (const [k, r] of b.pieces.entries()) ring(`city.builtUp.${b.id}.pieces.${k}`, r, city);
@@ -964,6 +975,53 @@ export function ringsOnStage(view: View, rings: readonly Ring[], o: StageOptions
       const pts = thin(dedupe(piece.map(view.project), 0.05, true), o.detail ?? 0.6, o.max ?? 200, true);
       if (pts && pts.length >= 3 && area(pts) >= (o.minArea ?? 30)) out.push(pts);
     }
+  }
+  return out;
+}
+
+export interface BlocksOptions {
+  /**
+   * Stage units: blocks parted by a lane narrower than this on the stage are joined into one, and what was a lane
+   * between them is filled: the level of detail of the size the city is drawn at. Left out: every block as it is.
+   */
+  merge?: number;
+  /** The least bend drawn, in stage units (0.35). */
+  detail?: number;
+  /** Blocks smaller than this on the stage, in square units, are left out (4). */
+  minArea?: number;
+  /** How far past the stage's edge blocks are kept, in stage units (120). */
+  margin?: number;
+}
+
+/**
+ * A city's blocks (`city.blocks`, or any rings of the plane) as outlines on the stage, for a renderer that fills many
+ * outlines as one (skink3-engine's `fabric`): those that reach into the view and its margin, whole, thinned to
+ * `detail`, at least `minArea`. With `merge`, blocks that a lane narrower than `merge` stage units parts are joined, so
+ * that a city seen small is drawn with the streets that can be seen at that size and no more.
+ */
+export function blocksOnStage(view: View, blocks: readonly ({ ring: Ring } | Ring)[], o: BlocksOptions = {}): Point[][] {
+  const box = grown(view, o.margin ?? 120);
+  const detail = o.detail ?? 0.35;
+  const least = o.minArea ?? 4;
+  const onStage: Point[][] = [];
+  for (const b of blocks) {
+    const ring = Array.isArray(b) ? (b as Ring) : (b as { ring: Ring }).ring;
+    let [x0, y0, x1, y1] = [Infinity, Infinity, -Infinity, -Infinity];
+    for (const p of ring) {
+      if (p[0] < x0) x0 = p[0];
+      if (p[0] > x1) x1 = p[0];
+      if (p[1] < y0) y0 = p[1];
+      if (p[1] > y1) y1 = p[1];
+    }
+    if (x1 < box[0] || x0 > box[2] || y1 < box[1] || y0 > box[3]) continue;
+    const pts = dedupe(ring.map(view.project), 0.05, true);
+    if (pts.length >= 3) onStage.push(pts);
+  }
+  const merged = o.merge === undefined ? onStage : mergeBlocks(onStage, { merge: o.merge, cell: Math.min(1, o.merge / 3) });
+  const out: Point[][] = [];
+  for (const ring of merged) {
+    const pts = thin(ring, detail, 4000, true);
+    if (pts && pts.length >= 3 && area(pts) >= least) out.push(pts);
   }
   return out;
 }
